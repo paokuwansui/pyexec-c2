@@ -26,7 +26,6 @@ def run(host, port, key_hex, fingerprint):
 
     code = f'''\
 import ssl as _sl, hashlib as _hl, socket as _sa
-_FP = {fingerprint!r}
 def _nT():
     s = _sa.socket()
     s.settimeout(30)
@@ -36,7 +35,7 @@ def _nT():
     ctx.verify_mode = _sl.CERT_NONE
     t = ctx.wrap_socket(s)
     der = t.getpeercert(binary_form=True)
-    if _hl.sha256(der).hexdigest() != _FP:
+    if _hl.sha256(der).hexdigest() != {fingerprint!r}:
         t.close()
         raise ConnectionError("tls fingerprint mismatch")
     return t

@@ -60,6 +60,7 @@ class ServerConfig:
     dns_port: int = 0                # DNS 隧道监听端口（0=禁用，53 需 root）
     relay_port: int = 0              # 中继通道端口（0=禁用，13/14）
     socks5_port: int = 0             # SOCKS5 动态代理端口（0=禁用，13）
+    relay_host: str = "127.0.0.1"    # relay/socks5 监听地址（默认回环，防公网无认证暴露）
     auto_commands: list = field(default_factory=list)
     base_dir: str = ""               # 配置文件所在目录（load_config 设置）
     config_path: str = ""            # 配置文件绝对路径（load_config 设置，reload 用）

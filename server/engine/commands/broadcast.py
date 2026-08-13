@@ -40,7 +40,8 @@ def run(disp, args):
     for c in beacons:
         # 每个 beacon 独立 Task（独立 task_id），日志/结果可按批次区分
         t = Task(code=task.code,
-                 result_processor=task.result_processor)
+                 result_processor=task.result_processor,
+                 proc_arg=task.proc_arg)
         if disp.tq.push(c.client_id, t):
             count += 1
     return f"[+] 已向 {count}/{len(beacons)} 个 Beacon 下发任务"

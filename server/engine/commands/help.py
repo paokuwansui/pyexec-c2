@@ -18,7 +18,7 @@ _HELP = (
     "  config                     显示配置\n"
     "  s_modules            列出 server 端模块\n"
     "  s_exec <mod> [args]  执行 server 端模块\n"
-    "  uplevel [id] <proto> <host> <port> <key> [fp]  升级通道（tls）\n"
+    "  uplevel [id] <proto> <host> <port> <key> [fp] [retry] [timeout]  升级通道（tls，多级回退）\n"
     "  exit                       退出\n"
 )
 

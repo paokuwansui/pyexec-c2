@@ -46,7 +46,7 @@ def run(keyword, path="."):
 
     _walk(path, 0)
     if not results:
-        return f"(no match: {name} under {path})"
+        return f"(no match: {keyword} under {path})"
     out = "\n".join(results)
     if len(results) >= _MAX_RESULTS:
         out += f"\n... (truncated at {_MAX_RESULTS})"

