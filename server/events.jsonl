@@ -1,3 +1,4 @@
-{"ts": "2026-08-08T01:58:37.771405", "event": "server_start", "beacon": "-", "port": 9001, "client_port": 9002}
-{"ts": "2026-08-08T01:58:53.847308", "event": "server_stop", "beacon": "-"}
-{"ts": "2026-08-08T02:04:59.230048", "event": "server_start", "beacon": "-", "port": 9001, "client_port": 9002}
+{"ts": "2026-08-14T02:23:11.869816", "event": "server_start", "beacon": "-", "port": 9001, "client_port": 9002}
+{"ts": "2026-08-14T02:24:21.830044", "event": "server_start", "beacon": "-", "port": 9001, "client_port": 9002}
+{"ts": "2026-08-14T02:38:05.455425", "event": "server_start", "beacon": "-", "port": 9001, "client_port": 9002}
+{"ts": "2026-08-14T02:40:02.182001", "event": "server_start", "beacon": "-", "port": 9001, "client_port": 9002}
