@@ -5,11 +5,11 @@ PyExec2 是一个**纯标准库（zero-dependency）**的命令与控制（C2）
 socks5 动态代理、端口转发、持久化与自愈。面向授权红队/渗透测试场景。
 
 ```
-┌────────────┐  TCP 9001 (XOR+zlib 帧)  ┌───────────┐  TLS  ┌─────────────┐
+┌────────────┐  TCP 65503 (XOR+zlib 帧)  ┌───────────┐  TLS  ┌─────────────┐
 │  Beacon    │ ◄───────────────────────► │  Server   │ ◄──── │  Proxy 中转  │
-│ (implant)  │  TLS/HTTPS/DNS 可选通道    │ (9001/9002│       │ (生成的代码) │
-│            │  UDP 9001 心跳              │  +https/  │       └─────────────┘
-└────────────┘                            │  dns/relay│  TCP 9002 (client)
+│ (implant)  │  TLS/HTTPS/DNS 可选通道    │ (65503/65504│       │ (生成的代码) │
+│            │  UDP 65503 心跳              │  +https/  │       └─────────────┘
+└────────────┘                            │  dns/relay│  TCP 65504 (client)
                                           │  /socks5) │ ◄─────────────────────► 操作员 Client
                                           └───────────┘                          (client.py)
 ```
@@ -79,7 +79,7 @@ pyexec-c2-main/
 cd server
 python3 server.py                 # 交互控制台
 python3 server.py --headless      # 无控制台（配合远程 client）
-python3 server.py --port 9001 --host 0.0.0.0
+python3 server.py --port 65503 --host 0.0.0.0
 ```
 
 首次启动自动生成 `config.json`（含随机 implant_key/client_key）。
@@ -88,7 +88,7 @@ python3 server.py --port 9001 --host 0.0.0.0
 
 ```console
 pyexec> s_exec keygen                       # 重新生成密钥（改 key 后需重启 server）
-pyexec> s_exec build 192.168.1.10 9001      # host=Server 地址
+pyexec> s_exec build 192.168.1.10 65503      # host=Server 地址
 ```
 
 `build` 输出单行部署命令（`echo "..." | python3`），复制到目标机执行。
@@ -116,8 +116,8 @@ python3 client.py -c "beacon"
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| server_host / server_port | 0.0.0.0 / 9001 | implant 监听 |
-| client_port | 9002 | 操作员 client 监听 |
+| server_host / server_port | 0.0.0.0 / 65503 | implant 监听 |
+| client_port | 65504 | 操作员 client 监听 |
 | implant_key / client_key | 随机 64hex | 通信密钥（XOR 32 字节） |
 | max_connections / max_frame_size | 256 / 512KB | 资源上限 |
 | max_result_size / max_task_code_size | 1MB / 256KB | 结果/任务代码上限 |
@@ -187,11 +187,11 @@ proxychains4 curl http://<内网目标>/
 
 | 通道 | 端口 | 说明 |
 |------|------|------|
-| TCP 直连 | 9001 | 基线，XOR+zlib 帧 |
+| TCP 直连 | 65503 | 基线，XOR+zlib 帧 |
 | TLS（proxy 中转） | 随机 | `s_exec proxy <host> <port>` 生成中转代码；自签证书 + 指纹校验 |
 | HTTPS | https_port | 无状态 POST 轮询 `/poll/<bid>`，单帧响应 |
 | DNS | dns_port | 查询域名分片（≤60 字符/段）+ TXT 多片响应；适合信令/小数据 |
-| client 通道 | 9002 | 操作员连接；client_tls 可选 |
+| client 通道 | 65504 | 操作员连接；client_tls 可选 |
 
 `uplevel` 两阶段升级：先切新传输探测连接，成功提交、失败回滚（无失联窗口）。
 
