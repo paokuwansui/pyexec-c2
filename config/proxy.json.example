@@ -1,0 +1,6 @@
+{
+  "port": 1080,
+  "username": "pyexec",
+  "password": "CHANGE_ME",
+  "allowlist": ["*"]
+}
