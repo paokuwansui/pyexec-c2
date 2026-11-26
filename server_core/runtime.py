@@ -373,7 +373,19 @@ class ServerRuntime:
                 out.append(self._beacon_status(record))
         order = self._beacon_order()
         order_index = {beacon_id: index for index, beacon_id in enumerate(order)}
-        out.sort(key=lambda item: (order_index.get(item.get("id"), len(order)), str(item.get("last_seen", ""))))
+        def seen_timestamp(item):
+            try:
+                return datetime.fromisoformat(str(item.get("last_seen", ""))).timestamp()
+            except Exception:
+                return 0.0
+        # Newly discovered Beacons that are not in the saved manual order are
+        # shown first, newest heartbeat first. Once an operator drags them into
+        # the saved order, the existing manual ordering is preserved.
+        out.sort(key=lambda item: (
+            0 if item.get("id") not in order_index else 1,
+            -seen_timestamp(item) if item.get("id") not in order_index else order_index[item.get("id")],
+            str(item.get("id", "")),
+        ))
         return out
 
     def get_beacon(self, beacon_id: str) -> dict:

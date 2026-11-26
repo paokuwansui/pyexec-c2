@@ -178,6 +178,17 @@ def create_local_app(server: str, token: str, config_path: str = "config.json") 
         except OSError:
             pass
 
+    def ai_memory_text(items: list[dict]) -> str:
+        return "\n\n".join(
+            f"## {item.get('title', '未命名记忆')}\n{item.get('content', '')}"
+            for item in items
+        ) if items else "(empty)"
+
+    def ai_memory_signature(items: list[dict]) -> str:
+        return hashlib.sha256(
+            json.dumps(items, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
     def ai_config_public(config: dict) -> dict:
         key = str(config.get("api_key", ""))
         return {
@@ -664,6 +675,15 @@ def create_local_app(server: str, token: str, config_path: str = "config.json") 
             while True:
                 if run.get("abort"):
                     return _agent_payload(run, ok=False, aborted=True)
+                current_memory = load_ai_memory()
+                current_signature = ai_memory_signature(current_memory)
+                if current_signature != run.get("memory_signature"):
+                    run["messages"].append({
+                        "role": "system",
+                        "content": "Durable memory was updated. Use this current memory as the source of truth:\n" + ai_memory_text(current_memory),
+                    })
+                    run["memory_signature"] = current_signature
+                    if emit: emit({"type": "status", "text": "检测到记忆更新，已同步到当前 AI 运行…"})
                 if emit: emit({"type": "status", "text": "AI 正在思考并等待模型响应…"})
                 response = _llm_request(run["config"], run["messages"], _agent_tools())
                 choice = (response.get("choices") or [{}])[0]
@@ -738,7 +758,7 @@ def create_local_app(server: str, token: str, config_path: str = "config.json") 
         if not config.get("base_url") or not config.get("api_key"):
             return JSONResponse({"ok": False, "error": "AI base URL and API key are required"}, status_code=400)
         memory = load_ai_memory()
-        memory_text = "\n\n".join(f"## {item.get('title', '未命名记忆')}\n{item.get('content', '')}" for item in memory) if memory else "(empty)"
+        memory_text = ai_memory_text(memory)
         skill_notes = [item for item in load_notebooks() if item.get("category") == "redteam" and item.get("ai_skill")]
         skill_text = "\n\n".join(f"## {item.get('title') or '未命名红队笔记'}\n{str(item.get('content') or '')[:4000]}" for item in skill_notes) if skill_notes else "(empty)"
         system = (
@@ -779,6 +799,7 @@ def create_local_app(server: str, token: str, config_path: str = "config.json") 
             "beacon_ids": [],
             "pending_calls": None,
             "abort": False,
+            "memory_signature": ai_memory_signature(memory),
             "approval_mode": str(config.get("approval_mode") or "ai") if str(config.get("approval_mode") or "ai") in {"human", "ai", "none"} else "ai",
         }
         with agent_runs_lock:
@@ -799,7 +820,7 @@ def create_local_app(server: str, token: str, config_path: str = "config.json") 
         if not config.get("base_url") or not config.get("api_key"):
             return JSONResponse({"ok": False, "error": "AI base URL and API key are required"}, status_code=400)
         memory = load_ai_memory()
-        memory_text = "\n\n".join(f"## {item.get('title', '未命名记忆')}\n{item.get('content', '')}" for item in memory) if memory else "(empty)"
+        memory_text = ai_memory_text(memory)
         skill_notes = [item for item in load_notebooks() if item.get("category") == "redteam" and item.get("ai_skill")]
         skill_text = "\n\n".join(f"## {item.get('title') or '未命名红队笔记'}\n{str(item.get('content') or '')[:4000]}" for item in skill_notes) if skill_notes else "(empty)"
         system = (

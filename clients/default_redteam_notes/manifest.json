@@ -1,113 +1,106 @@
 [
   {
-    "id": "builtin_redteam_00",
-    "title": "红队笔记索引与命令速查",
-    "file": "00_index.md",
-    "ai_skill": false,
-    "version": 2
-  },
-  {
     "id": "builtin_redteam_01",
     "title": "第1章 信息收集",
-    "file": "01_信息收集.md",
+    "file": "builtin_redteam_01.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_02",
     "title": "第2章 下载与执行",
-    "file": "02_下载与执行.md",
+    "file": "builtin_redteam_02.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_03",
     "title": "第3章 通道构建",
-    "file": "03_通道构建.md",
+    "file": "builtin_redteam_03.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_04",
     "title": "第4章 密码获取",
-    "file": "04_密码获取.md",
+    "file": "builtin_redteam_04.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_05",
     "title": "第5章 权限提升（Windows / Linux）",
-    "file": "05_权限提升.md",
+    "file": "builtin_redteam_05.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_06",
     "title": "第6章 横向移动",
-    "file": "06_横向移动.md",
+    "file": "builtin_redteam_06.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_07",
     "title": "第7章 权限维持",
-    "file": "07_权限维持.md",
+    "file": "builtin_redteam_07.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_08",
     "title": "第8章 痕迹清理",
-    "file": "08_痕迹清理.md",
+    "file": "builtin_redteam_08.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_09",
     "title": "第9章 发现域和进入域",
-    "file": "09_发现域和进入域.md",
+    "file": "builtin_redteam_09.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_10",
     "title": "第10章 域信息收集",
-    "file": "10_域信息收集.md",
+    "file": "builtin_redteam_10.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_11",
     "title": "第11章 域控制器服务器权限获取分析",
-    "file": "11_域控制器权限获取分析.md",
+    "file": "builtin_redteam_11.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_12",
     "title": "第12章 NTLM 中继",
-    "file": "12_NTLM中继.md",
+    "file": "builtin_redteam_12.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_13",
     "title": "第13章 域管权限利用分析",
-    "file": "13_域管权限利用分析.md",
+    "file": "builtin_redteam_13.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_14",
     "title": "第14章 域后门分析",
-    "file": "14_域后门分析.md",
+    "file": "builtin_redteam_14.md",
     "ai_skill": false,
     "version": 2
   },
   {
     "id": "builtin_redteam_15",
     "title": "第15章 Exchange 权限利用分析",
-    "file": "15_Exchange权限利用分析.md",
+    "file": "builtin_redteam_15.md",
     "ai_skill": false,
     "version": 2
   }

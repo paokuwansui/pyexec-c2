@@ -1809,6 +1809,8 @@ function AIGuide() {
 }
 
 
+const AGENT_WELCOME = { role: 'assistant', content: 'AI Agent 已就绪。我可以调用 PyExec2 的 Action 查看 Beacon、执行任务、处理分片文件、管理分组和执行审批。' }
+
 function AIAgent({ onOpenApprovals }) {
   const [config, setConfig] = useState(null)
   const [memory, setMemory] = useState([])
@@ -1848,7 +1850,7 @@ function AIAgent({ onOpenApprovals }) {
   const [memoryTitle, setMemoryTitle] = useState('')
   const [memoryContent, setMemoryContent] = useState('')
   const [memoryBusy, setMemoryBusy] = useState(false)
-  const [messages, setMessages] = useState([{ role: 'assistant', content: 'AI Agent 已就绪。我可以调用 PyExec2 的 Action 查看 Beacon、执行任务、处理分片文件、管理分组和执行审批。' }])
+  const [messages, setMessages] = useState([AGENT_WELCOME])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [configMsg, setConfigMsg] = useState('')
@@ -2123,6 +2125,20 @@ function AIAgent({ onOpenApprovals }) {
     appendChatMessage({ role: 'assistant', system: true, content: '⚡ 已将排队对话提升为插入对话，正在打断当前思路。' })
     await startChat(item.text)
   }
+  const restartConversation = async () => {
+    await stopAgent(false, true)
+    const welcome = { ...AGENT_WELCOME }
+    messagesRef.current = [welcome]
+    setMessages([welcome])
+    setInput('')
+    setPendingApproval(null)
+    setServerApprovalWait(null)
+    setLiveEvents([])
+    setLiveStatus('')
+    setError('')
+    queueRef.current = []
+    setQueue([])
+  }
   const send = async () => {
     const text = input.trim()
     if (!text) return
@@ -2168,7 +2184,7 @@ function AIAgent({ onOpenApprovals }) {
   for (const event of liveEvents) traceItems.push({ ...event, index: traceItems.length + 1 })
   if (liveStatus) traceItems.push({ kind: 'live', label: '运行中', content: liveStatus, index: traceItems.length + 1 })
   return <div className="page ai-agent-page">
-    <header className="page-head"><div><div className="eyebrow">BUILT-IN AGENT</div><h1>AI 模式<span>_</span></h1><p>内置 PyExec2 Agent · 可操作 C2 全部 Action · 独立记忆最多 200 条</p></div><div className="ai-agent-head-actions"><span className="micro">{config.model} · THINKING {String(config.thinking || 'max').toUpperCase()} · APPROVAL {approvalMode.toUpperCase()}</span><button className="ghost" onClick={openMemoryManager}>查看记忆 ({memory.length})</button><button className="ghost danger" onClick={() => setResetOpen(true)}>回退基础设置</button><button className="ghost" onClick={() => setSettingsOpen(true)}>AI 配置</button></div></header>
+    <header className="page-head"><div><div className="eyebrow">BUILT-IN AGENT</div><h1>AI 模式<span>_</span></h1><p>内置 PyExec2 Agent · 可操作 C2 全部 Action · 独立记忆最多 200 条</p></div><div className="ai-agent-head-actions"><span className="micro">{config.model} · THINKING {String(config.thinking || 'max').toUpperCase()} · APPROVAL {approvalMode.toUpperCase()}</span><button className="ghost" onClick={restartConversation}>重新开始对话</button><button className="ghost" onClick={openMemoryManager}>查看记忆 ({memory.length})</button><button className="ghost danger" onClick={() => setResetOpen(true)}>回退基础设置</button><button className="ghost" onClick={() => setSettingsOpen(true)}>AI 配置</button></div></header>
     <div className="ai-agent-layout">
       <Panel title="Agent 对话" eyebrow="TOOL-CALLING C2 AGENT" className="agent-chat-panel" right={<button className={chatMarkdown ? 'primary' : 'ghost'} onClick={() => setChatMarkdown(prev => !prev)}>{chatMarkdown ? 'Markdown 已开启' : 'Markdown 已关闭'}</button>}>
         <div className="agent-chat-log" ref={chatLogRef} onScroll={onChatScroll}>{messages.map((message, index) => <div key={index} className={`chat-msg ${message.role}`}><div className="chat-role">{message.role === 'user' ? 'OPERATOR' : 'AGENT'}</div>{message.thinking && <details className="chat-thinking" open><summary>思考过程</summary><pre>{message.thinking}</pre></details>}{chatMarkdown ? <div className="chat-content markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={{ a: ({ node, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> }}>{message.content}</ReactMarkdown></div> : <div className="chat-content">{message.content}</div>}{message.trace?.length > 0 && <details className="chat-trace"><summary>工具调用 {message.trace.length}</summary>{message.trace.map((trace, i) => <div key={i}><code>{trace.tool}</code><pre>{JSON.stringify(trace.args, null, 2)}{'\n→\n'}{JSON.stringify(trace.result, null, 2).slice(0, 2000)}</pre></div>)}</details>}</div>)}{busy && <div className="chat-msg assistant live"><div className="chat-role">AGENT · LIVE</div><div className="chat-content">{liveStatus || 'AI 正在思考并调用工具…'}</div></div>}</div>
