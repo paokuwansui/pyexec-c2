@@ -2,6 +2,11 @@
 
 pyexec2 是一个插件优先、文件存储驱动的 Python C2 / 远程 Python 执行平台，仅用于授权的安全测试和实验环境。
 
+
+<img width="1260" height="686" alt="屏幕截图 2026-11-27 024233" src="https://github.com/user-attachments/assets/4c7ccb7d-26cc-4f6a-96ba-80172ac9157e" />
+<img width="1262" height="695" alt="屏幕截图 2026-11-27 022901" src="https://github.com/user-attachments/assets/4a6c40b4-6e0c-4181-8271-2896c647a76a" />
+<img width="1248" height="683" alt="屏幕截图 2026-11-27 024253" src="https://github.com/user-attachments/assets/ec424124-f95b-485e-8274-43d6f3e2df32" />
+
 ## 项目结构
 
 - `server_core/`：控制面、文件存储、Action 注册、任务引擎、监听器和代理网关。
