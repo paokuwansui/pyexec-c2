@@ -62,6 +62,8 @@ class ServerRuntime:
         self.active_payloads: dict[str, dict] = {}
         self.payload_sources: dict[str, str] = {}
         self._seen_nonces: dict[str, float] = {}
+        self._poll_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+        self._poll_cache_lock = threading.RLock()
         self._lock = threading.RLock()
         self._ensure_config()
         self._purge_payload_history()
@@ -225,6 +227,26 @@ class ServerRuntime:
         # Backward compatibility for payloads generated before DH support.
         return base64.b64decode(payload["key_b64"])
 
+    POLL_CACHE_TTL = 60.0
+    POLL_CACHE_MAX = 512
+
+    def _poll_cache_get(self, key: tuple[str, str]) -> dict | None:
+        now = time.time()
+        with self._poll_cache_lock:
+            cached = self._poll_cache.get(key)
+            if cached and now - cached[0] <= self.POLL_CACHE_TTL:
+                return cached[1]
+            if cached:
+                self._poll_cache.pop(key, None)
+        return None
+
+    def _poll_cache_put(self, key: tuple[str, str], response: dict) -> None:
+        with self._poll_cache_lock:
+            self._poll_cache[key] = (time.time(), response)
+            if len(self._poll_cache) > self.POLL_CACHE_MAX:
+                oldest = min(self._poll_cache.items(), key=lambda item: item[1][0])[0]
+                self._poll_cache.pop(oldest, None)
+
     def transport_poll(self, request: dict) -> dict:
         token = request.get("payload_token", "")
         payload = self._payload_for_token(token)
@@ -232,6 +254,8 @@ class ServerRuntime:
         sealed = base64.b64decode(request["data"])
         raw = open_seal(key, sealed, b"pyexec2-implant")
         inner = json.loads(raw.decode("utf-8"))
+        request_id = str(inner.get("request_id") or "")
+        cache_key = (str(payload.get("token", token)), request_id) if request_id else None
         if payload.get("replay_protection"):
             now = time.time()
             sent_at = float(inner.get("sent_at", 0) or 0)
@@ -244,6 +268,13 @@ class ServerRuntime:
                     raise RuntimeErrorBase("poll replay detected")
                 self._seen_nonces[nonce] = now
         beacon = self._touch_beacon(inner.get("beacon", {}), payload, inner.get("protocol", payload.get("protocol", "")), inner.get("heartbeat"))
+        if cache_key:
+            cached = self._poll_cache_get(cache_key)
+            if cached is not None:
+                return cached
+        task_ack = [str(item) for item in (inner.get("task_ack") or []) if item]
+        if task_ack:
+            self.tasks.ack_tasks(payload["beacon_id"], task_ack)
         ack_results = []
         upgrade_requests = []
         for result in inner.get("results", []):
@@ -278,6 +309,7 @@ class ServerRuntime:
         auto_mode = self.tasks.auto_mode(payload["beacon_id"])
         response = {
             "kind": "poll_result",
+            "request_id": request_id,
             "ack_results": ack_results,
             "tasks": tasks,
             "dispatch_count": len(tasks),
@@ -289,11 +321,14 @@ class ServerRuntime:
         if upgrade_requests:
             response["upgrade_apply"] = True
         sealed_response = seal(key, json.dumps(response, ensure_ascii=False).encode("utf-8"), b"pyexec2-server")
+        response_outer = {"data": base64.b64encode(sealed_response).decode("ascii")}
+        if cache_key:
+            self._poll_cache_put(cache_key, response_outer)
         # The response above is sealed with the old key. Only after it is
         # sealed do we rotate the active payload token/key on the server.
         for upgrade in upgrade_requests:
             self._apply_payload_upgrade(payload, upgrade)
-        return {"data": base64.b64encode(sealed_response).decode("ascii")}
+        return response_outer
 
     def _apply_payload_upgrade(self, payload: dict, upgrade: dict) -> None:
         old_token = str(payload.get("token", ""))
@@ -373,17 +408,21 @@ class ServerRuntime:
                 out.append(self._beacon_status(record))
         order = self._beacon_order()
         order_index = {beacon_id: index for index, beacon_id in enumerate(order)}
-        def seen_timestamp(item):
+        def first_seen_timestamp(item):
             try:
-                return datetime.fromisoformat(str(item.get("last_seen", ""))).timestamp()
+                return datetime.fromisoformat(str(item.get("first_seen") or "")).timestamp()
             except Exception:
+                # Legacy records without first_seen must not fall back to
+                # last_seen here: last_seen changes on every heartbeat and
+                # would make unlisted rows move while an operator is watching.
                 return 0.0
         # Newly discovered Beacons that are not in the saved manual order are
-        # shown first, newest heartbeat first. Once an operator drags them into
+        # shown first, newest discovery first. Use first_seen, not last_seen,
+        # so heartbeats never reorder rows. Once an operator drags them into
         # the saved order, the existing manual ordering is preserved.
         out.sort(key=lambda item: (
             0 if item.get("id") not in order_index else 1,
-            -seen_timestamp(item) if item.get("id") not in order_index else order_index[item.get("id")],
+            -first_seen_timestamp(item) if item.get("id") not in order_index else order_index[item.get("id")],
             str(item.get("id", "")),
         ))
         return out
@@ -600,11 +639,11 @@ class ServerRuntime:
             target = str(args.get("protocol", ""))
             if target not in {"tcp", "udp", "http", "https", "dns"}:
                 raise RuntimeErrorBase("unsupported protocol")
-            return self.tasks.create_control_task(
-                beacon_id,
-                "protocol_switch",
-                {"protocol": target, "host": args.get("host", ""), "port": args.get("port")},
-            )
+            payload = {"protocol": target, "host": args.get("host", ""), "port": args.get("port")}
+            for key in ("url", "token", "key"):
+                if args.get(key):
+                    payload[key] = args[key]
+            return self.tasks.create_control_task(beacon_id, "protocol_switch", payload)
         if action == "approval.list":
             return self._list_approvals(status=args.get("status"))
         if action == "approval.pending":

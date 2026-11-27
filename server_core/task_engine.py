@@ -6,6 +6,7 @@ import json
 import shutil
 import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,10 +20,13 @@ class TaskError(Exception):
 
 
 class TaskEngine:
+    TASK_LEASE_SECONDS = 8.0
+
     def __init__(self, store: FileStore, pipeline: CodeDeliveryPipeline):
         self.store = store
         self.pipeline = pipeline
         self._lock = threading.RLock()
+        self._leases: dict[str, dict] = {}
 
     def create_task(
         self,
@@ -252,24 +256,76 @@ class TaskEngine:
             "display": raw.get("display", ""),
         }]
 
+    def ack_tasks(self, beacon_id: str, task_ids: list[str]) -> dict:
+        """Confirm task delivery. Leases are removed only after client ACK."""
+        acknowledged = []
+        with self._lock:
+            for task_id in task_ids:
+                lease = self._leases.get(str(task_id))
+                if not lease or lease.get("beacon_id") != beacon_id:
+                    continue
+                self._leases.pop(str(task_id), None)
+                record = self.store.read_json(f"tasks/{task_id}/task.json", default={})
+                if record:
+                    record["acknowledged_at"] = now_iso()
+                    record["lease_until"] = None
+                    self.store.write_json(f"tasks/{task_id}/task.json", record)
+                acknowledged.append(str(task_id))
+        return {"acknowledged": acknowledged, "count": len(acknowledged)}
+
+    def _append_queue_entry(self, beacon_id: str, task_id: str, created_at: str | None = None) -> None:
+        queue_rel = f"queues/{beacon_id}/pending.jsonl"
+        existing = {str(item.get("task_id")) for item in self.store.iter_jsonl(queue_rel)}
+        if task_id not in existing:
+            self.store.append_jsonl(queue_rel, {"task_id": task_id, "created_at": created_at or now_iso()})
+
+    def _expire_leases(self, beacon_id: str) -> None:
+        now = time.time()
+        for task_id, lease in list(self._leases.items()):
+            if lease.get("beacon_id") != beacon_id or float(lease.get("expires_at", 0)) > now:
+                continue
+            record = self.store.read_json(f"tasks/{task_id}/task.json", default={})
+            if not record or record.get("status") in {"succeeded", "failed", "cancelled"}:
+                self._leases.pop(task_id, None)
+                continue
+            record["status"] = "queued"
+            record["lease_until"] = None
+            record["requeued_at"] = now_iso()
+            self.store.write_json(f"tasks/{task_id}/task.json", record)
+            self._leases.pop(task_id, None)
+            self._append_queue_entry(beacon_id, task_id, record.get("created_at"))
+            self.store.event("task.lease_expired", {"task_id": task_id, "beacon_id": beacon_id})
+
     def claim_tasks(self, beacon_id: str, limit: int = 8) -> list[dict]:
         with self._lock:
             auto = self._claim_auto(beacon_id)
             if auto is not None:
                 return auto
+            self._expire_leases(beacon_id)
             queue_rel = f"queues/{beacon_id}/pending.jsonl"
             entries = list(self.store.iter_jsonl(queue_rel))
             if not entries:
                 return []
-            selected = entries[:limit]
-            remaining = entries[limit:]
+            selected = []
+            remaining = []
+            seen = set()
+            for entry in entries:
+                task_id = str(entry.get("task_id", ""))
+                if not task_id or task_id in seen:
+                    continue
+                seen.add(task_id)
+                record = self.store.read_json(f"tasks/{task_id}/task.json", default={})
+                if not record or record.get("status") != "queued":
+                    continue
+                if len(selected) < limit:
+                    selected.append(entry)
+                else:
+                    remaining.append(entry)
             queue_path = self.store.path(queue_rel)
             queue_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = queue_path.with_suffix(".jsonl.tmp")
             with tmp.open("w", encoding="utf-8") as fh:
                 for entry in remaining:
-                    import json
-
                     fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
             import os
 
@@ -282,7 +338,14 @@ class TaskEngine:
                     continue
                 record["status"] = "dispatched"
                 record["dispatched_at"] = now_iso()
+                record["delivery_count"] = int(record.get("delivery_count", 0)) + 1
+                record["lease_until"] = (datetime.now().astimezone() + timedelta(seconds=self.TASK_LEASE_SECONDS)).isoformat()
                 self.store.write_json(f"tasks/{task_id}/task.json", record)
+                self._leases[task_id] = {
+                    "beacon_id": beacon_id,
+                    "expires_at": time.time() + self.TASK_LEASE_SECONDS,
+                    "delivery_count": record["delivery_count"],
+                }
                 claimed.append(
                     {
                         "task_id": task_id,
@@ -343,7 +406,10 @@ class TaskEngine:
         record["finished_at"] = result["received_at"]
         record["output"] = output
         record["error"] = error
+        record["lease_until"] = None
         self.store.write_json(f"tasks/{task_id}/task.json", record)
+        with self._lock:
+            self._leases.pop(task_id, None)
         self.store.event(
             "task.result_received",
             {"task_id": task_id, "beacon_id": record.get("beacon_id"), "status": record["status"], "bytes": result["output_bytes"]},
@@ -356,6 +422,9 @@ class TaskEngine:
         Tasks already dispatched to the Beacon are deliberately untouched.
         """
         with self._lock:
+            for task_id, lease in list(self._leases.items()):
+                if lease.get("beacon_id") == beacon_id:
+                    self._leases.pop(task_id, None)
             cancelled = []
             for directory in self.store.list_dirs("tasks"):
                 record = self.store.read_json(f"tasks/{directory.name}/task.json")

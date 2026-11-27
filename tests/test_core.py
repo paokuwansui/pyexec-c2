@@ -57,6 +57,7 @@ def test_plugin_platform_commands(client):
     assert "wps" in commands
     assert "lls" in commands
     assert "wls" in commands
+    assert "lmasquerade" in commands
     assert "lcat" in commands
     assert "wcat" in commands
     assert "lmkdir" in commands
@@ -705,3 +706,119 @@ def test_beacon_manual_display_order(client):
     listed = client.post("/api/action", headers=headers, json={"action": "beacon.list", "args": {}}).json()["data"]
     ids = [item["id"] for item in listed if item["id"] in {"order-a", "order-b"}]
     assert ids == ["order-a", "order-b"]
+
+def test_unlisted_beacon_order_stays_stable_when_heartbeats_change(client):
+    from datetime import datetime, timezone, timedelta
+    runtime = client.app.state.runtime
+    runtime.store.write_json("beacon_order.json", {"order": []})
+    now = datetime.now(timezone.utc)
+    records = [
+        ("orderstable_old", (now - timedelta(hours=3)).isoformat(), (now - timedelta(seconds=20)).isoformat()),
+        ("orderstable_mid", (now - timedelta(hours=2)).isoformat(), (now - timedelta(seconds=10)).isoformat()),
+        ("orderstable_new", (now - timedelta(hours=1)).isoformat(), now.isoformat()),
+    ]
+    for beacon_id, first_seen, last_seen in records:
+        runtime.store.write_json(f"beacons/{beacon_id}/beacon.json", {
+            "id": beacon_id,
+            "status": "online",
+            "platform": "linux",
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+        })
+    watched = {"orderstable_old", "orderstable_mid", "orderstable_new"}
+    first_order = [item["id"] for item in runtime.list_beacons() if item["id"] in watched]
+    assert first_order == ["orderstable_new", "orderstable_mid", "orderstable_old"]
+
+    # Simulate a fresh heartbeat for the oldest discovered row. Its position
+    # must not change because unlisted ordering is based on first_seen.
+    runtime.store.write_json("beacons/orderstable_old/beacon.json", {
+        "id": "orderstable_old",
+        "status": "online",
+        "platform": "linux",
+        "first_seen": (now - timedelta(hours=3)).isoformat(),
+        "last_seen": now.isoformat(),
+    })
+    second_order = [item["id"] for item in runtime.list_beacons() if item["id"] in watched]
+    assert second_order == first_order
+
+
+
+def test_task_lease_ack_and_redelivery(client):
+    import time
+    runtime = client.app.state.runtime
+    beacon_id = "leasebeacon"
+    runtime.store.write_json(f"beacons/{beacon_id}/beacon.json", {
+        "id": beacon_id, "status": "online", "platform": "linux", "last_seen": now_iso(),
+    })
+    task = runtime.tasks.create_task(beacon_id, plugin="pwd", args={})
+    first = runtime.tasks.claim_tasks(beacon_id, limit=1)
+    assert [item["task_id"] for item in first] == [task["id"]]
+    assert runtime.tasks.claim_tasks(beacon_id, limit=1) == []
+
+    lease = runtime.tasks._leases[task["id"]]
+    lease["expires_at"] = time.time() - 1
+    redelivered = runtime.tasks.claim_tasks(beacon_id, limit=1)
+    assert [item["task_id"] for item in redelivered] == [task["id"]]
+    stored = runtime.store.read_json(f"tasks/{task['id']}/task.json")
+    assert stored["delivery_count"] == 2
+
+    ack = runtime.tasks.ack_tasks(beacon_id, [task["id"]])
+    assert ack["count"] == 1
+    assert task["id"] not in runtime.tasks._leases
+    assert runtime.tasks.claim_tasks(beacon_id, limit=1) == []
+
+
+def test_poll_request_cache_returns_same_task_batch(client):
+    runtime = client.app.state.runtime
+    token = "cache-token"
+    key = derive_key("cache-secret")
+    beacon_id = "cachebeacon"
+    runtime.active_payloads[token] = {
+        "id": "pl_cache_test",
+        "token": token,
+        "beacon_id": beacon_id,
+        "key_b64": base64.b64encode(key).decode(),
+        "replay_protection": False,
+        "protocol": "udp",
+    }
+    runtime.store.write_json(f"beacons/{beacon_id}/beacon.json", {
+        "id": beacon_id, "status": "online", "platform": "linux", "last_seen": now_iso(),
+    })
+    runtime.tasks.create_task(beacon_id, plugin="pwd", args={})
+    runtime.tasks.create_task(beacon_id, plugin="whoami", args={})
+    inner = {
+        "kind": "poll",
+        "request_id": "req-cache-test",
+        "protocol": "udp",
+        "beacon": {"id": beacon_id, "hostname": "cache", "platform": "linux", "username": "test"},
+        "results": [],
+        "task_ack": [],
+        "heartbeat": {"current": 2, "fast_interval": 2, "slow_interval": 15},
+    }
+    sealed = seal(key, __import__("json").dumps(inner).encode(), b"pyexec2-implant")
+    request = {"payload_token": token, "data": base64.b64encode(sealed).decode()}
+    first = runtime.transport_poll(request)
+    second = runtime.transport_poll(request)
+    assert first == second
+    import json
+    first_inner = json.loads(open_seal(key, base64.b64decode(first["data"]), b"pyexec2-server"))
+    second_inner = json.loads(open_seal(key, base64.b64decode(second["data"]), b"pyexec2-server"))
+    assert first_inner["request_id"] == "req-cache-test"
+    assert [item["task_id"] for item in first_inner["tasks"]] == [item["task_id"] for item in second_inner["tasks"]]
+    assert len(first_inner["tasks"]) == 2
+
+
+def test_udp_fragment_packets_fit_mtu_and_roundtrip():
+    import json
+    import zlib
+    from transport_plugins.udp import _fragment_payload
+    raw = ("payload-" * 400).encode()
+    packets = _fragment_payload(raw, "resp", "mid-test")
+    assert all(len(packet) <= 1200 for packet in packets)
+    chunks = {}
+    for packet in packets:
+        item = json.loads(packet)
+        chunk = base64.b64decode(item["d"])
+        assert item["c"] == f"{zlib.crc32(chunk) & 0xffffffff:08x}"
+        chunks[item["i"]] = chunk
+    assert b"".join(chunks[i] for i in range(len(chunks))) == raw

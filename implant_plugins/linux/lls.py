@@ -1,5 +1,7 @@
+import grp
 import json
 import os
+import pwd
 import stat
 import time
 
@@ -20,6 +22,14 @@ def run(runtime, args):
         for entry in entries:
             try:
                 info = entry.stat(follow_symlinks=False)
+                try:
+                    owner = pwd.getpwuid(info.st_uid).pw_name
+                except KeyError:
+                    owner = str(info.st_uid)
+                try:
+                    group = grp.getgrgid(info.st_gid).gr_name
+                except KeyError:
+                    group = str(info.st_gid)
                 items.append({
                     "name": entry.name,
                     "kind": "dir" if entry.is_dir(follow_symlinks=False) else "file",
@@ -27,6 +37,8 @@ def run(runtime, args):
                     "mode": stat.filemode(info.st_mode),
                     "uid": info.st_uid,
                     "gid": info.st_gid,
+                    "owner": owner,
+                    "group": group,
                     "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(info.st_mtime)),
                     "ctime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(info.st_ctime)),
                     "atime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(info.st_atime)),
@@ -43,6 +55,8 @@ def run(runtime, args):
             kind = "d" if item.get("kind") == "dir" else "-"
             mode = str(item.get("mode", "----------"))
             mode = (kind + mode[1:]) if len(mode) >= 10 else kind + "---------"
-            lines.append(f"{mode} {int(item.get('size', 0)):>10}  {item.get('mtime', '')}  {item.get('name', '')}")
+            owner = str(item.get('owner', item.get('uid', '—')))
+            group = str(item.get('group', item.get('gid', '—')))
+            lines.append(f"{mode} {owner}:{group} {int(item.get('size', 0)):>10} {item.get('mtime', '')} {item.get('name', '')}")
     runtime.emit("\n".join(lines))
     return {"path": path, "entries": items}

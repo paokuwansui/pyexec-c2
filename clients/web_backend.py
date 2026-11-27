@@ -9,6 +9,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,11 +58,16 @@ def create_local_app(server: str, token: str, config_path: str = "config.json") 
     NOTEBOOK_DIR.mkdir(parents=True, exist_ok=True)
 
     def safe_template_name(value: str) -> str:
-        name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
-        name = name.strip("._-") or f"template_{int(time.time())}"
-        if name.endswith(".py"):
+        # Preserve Unicode names (for example Chinese template names), while
+        # removing path separators, control characters and platform-reserved
+        # filename characters.
+        name = unicodedata.normalize("NFKC", str(value or "").strip())
+        if name.lower().endswith(".py"):
             name = name[:-3]
-        return name
+        name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", name)
+        name = re.sub(r"\s+", " ", name).strip(" ._-")
+        name = name[:80].rstrip(" ._-")
+        return name or f"template_{int(time.time())}"
 
     def template_record(path: Path) -> dict:
         stat = path.stat()
